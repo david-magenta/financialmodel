@@ -220,9 +220,9 @@ therapists = []
 therapists.append(Therapist(0, "Owner", "LCSW", 0, owner_sessions_per_week, owner_utilization, 0))
 
 default_hires = [
-    (1, "Therapist 1", "LMSW", 3, 20, 3000),
-    (2, "Therapist 2", "LMSW", 6, 20, 3000),
-    (3, "Therapist 3", "LCSW", 9, 20, 3500)
+    (1, "Therapist 1", "LMSW", 3, 20, 3000.0),
+    (2, "Therapist 2", "LMSW", 6, 20, 3000.0),
+    (3, "Therapist 3", "LCSW", 9, 20, 3500.0)
 ]
 
 for i in range(1, 13):
