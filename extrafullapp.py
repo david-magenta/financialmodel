@@ -113,12 +113,11 @@ for month in range(1, months_to_simulate + 1):
 
     # Calculate new client acquisition
     max_new_clients_marketing = monthly_marketing_budget / client_acquisition_cost if client_acquisition_cost > 0 else 0
-    required_new_clients = churned_clients  # Replace churned
-    capacity_available = max_capacity_in_clients - surviving_clients
+    capacity_available = max(0, max_capacity_in_clients - surviving_clients)  # How many clients can we add?
     
-    # Take minimum of marketing budget, capacity, and growth targets
-    new_clients = min(max_new_clients_marketing, max(required_new_clients, capacity_available))
-    new_clients = max(0, new_clients)  # Can't be negative
+    # Acquire as many as marketing budget allows, up to available capacity
+    # Note: capacity_available already accounts for churn (it's max - surviving)
+    new_clients = min(max_new_clients_marketing, capacity_available)
     new_clients_per_month.append(new_clients)
 
     # Total active clients
@@ -130,9 +129,21 @@ for month in range(1, months_to_simulate + 1):
     revenue = expected_sessions * effective_fee_per_session
     revenue_history.append(revenue)
     
-    # Cost calculation
-    owner_therapist_pay = owner_sessions_per_month * therapist_pay_per_session
-    therapist_pay = num_therapists * therapist_sessions_per_month * therapist_pay_per_session
+    # Cost calculation - FIXED: Pay therapists based on ACTUAL sessions delivered
+    # Split sessions proportionally between owner and therapists
+    if total_sessions_per_month > 0:
+        owner_proportion = owner_sessions_per_month / total_sessions_per_month
+        therapist_proportion = (num_therapists * therapist_sessions_per_month) / total_sessions_per_month
+    else:
+        owner_proportion = 0
+        therapist_proportion = 0
+    
+    # Actual sessions delivered this month based on clients
+    actual_owner_sessions_this_month = expected_sessions * owner_proportion
+    actual_therapist_sessions_this_month = expected_sessions * therapist_proportion
+    
+    owner_therapist_pay = actual_owner_sessions_this_month * therapist_pay_per_session
+    therapist_pay = actual_therapist_sessions_this_month * therapist_pay_per_session
     acquisition_cost = new_clients * client_acquisition_cost
     
     cost = owner_therapist_pay + therapist_pay + admin_cost_per_month + total_tech_cost + other_overhead_monthly + acquisition_cost
@@ -268,12 +279,38 @@ st.pyplot(fig1)
 st.header("Cash Balance Over Time")
 fig2, ax2 = plt.subplots(figsize=(10, 5))
 ax2.plot(range(1, months_to_simulate + 1), cash_balance[1:], marker='o', color='green', linewidth=2)
-ax2.axhline(y=0, color='red', linestyle='--', alpha=0.5)
+ax2.axhline(y=0, color='red', linestyle='--', alpha=0.5, label='Break-even')
+ax2.fill_between(range(1, months_to_simulate + 1), 0, cash_balance[1:], 
+                  where=[c < 0 for c in cash_balance[1:]], color='red', alpha=0.2, label='Negative Cash')
+ax2.fill_between(range(1, months_to_simulate + 1), 0, cash_balance[1:], 
+                  where=[c >= 0 for c in cash_balance[1:]], color='green', alpha=0.2, label='Positive Cash')
 ax2.set_xlabel("Month")
 ax2.set_ylabel("Cash Balance ($)")
-ax2.set_title("Cash Flow (with Insurance Payment Delay)")
+ax2.set_title(f"Cash Flow (with {insurance_payment_delay} month insurance delay)")
+ax2.legend()
 ax2.grid(True, alpha=0.3)
 st.pyplot(fig2)
+
+# Add explanation if cash is negative
+if cash_balance[-1] < 0:
+    st.warning(f"""
+    ⚠️ **Cash Balance is Negative**: ${cash_balance[-1]:,.0f}
+    
+    This means you need **working capital** to cover the insurance payment delay. You're profitable on paper 
+    but don't have enough cash to cover the {insurance_payment_delay}-month gap between paying costs and receiving insurance payments.
+    
+    **Solutions:**
+    - Start with ${abs(min(cash_balance[1:])):,.0f} in working capital
+    - Get a line of credit
+    - Negotiate faster insurance payments
+    - Grow more slowly (acquire fewer clients per month)
+    """)
+elif cash_balance[-1] > 0:
+    st.success(f"""
+    ✅ **Positive Cash Balance**: ${cash_balance[-1]:,.0f}
+    
+    Your practice has built up cash reserves despite the insurance payment delay. This is healthy!
+    """)
 
 st.header("Revenue vs Cost vs Profit")
 fig3, ax3 = plt.subplots(figsize=(10, 5))
@@ -287,6 +324,180 @@ ax3.set_title("Monthly Revenue, Cost, and Profit")
 ax3.legend()
 ax3.grid(True, alpha=0.3)
 st.pyplot(fig3)
+
+st.header("Client Acquisition Metrics")
+fig6, ax6 = plt.subplots(figsize=(10, 5))
+months = range(1, months_to_simulate + 1)
+
+# Calculate required marketing budget per month
+required_marketing_budget = []
+for idx, new_clients_count in enumerate(new_clients_per_month):
+    required_budget = new_clients_count * client_acquisition_cost
+    required_marketing_budget.append(required_budget)
+
+# Create dual-axis chart
+ax6_twin = ax6.twinx()
+
+# Bar chart for clients
+bar_width = 0.35
+positions = np.array(months)
+ax6.bar(positions - bar_width/2, new_clients_per_month, bar_width, label='New Clients Acquired', color='green', alpha=0.7)
+ax6.bar(positions + bar_width/2, churned_clients_per_month, bar_width, label='Churned Clients', color='red', alpha=0.7)
+
+# Line chart for budget
+ax6_twin.plot(months, required_marketing_budget, color='blue', marker='o', linewidth=2, label='Required Budget', markersize=4)
+ax6_twin.axhline(y=monthly_marketing_budget, color='purple', linestyle='--', linewidth=2, label=f'Actual Budget (${monthly_marketing_budget:,.0f})')
+
+ax6.set_xlabel("Month")
+ax6.set_ylabel("Number of Clients", color='black')
+ax6_twin.set_ylabel("Marketing Budget ($)", color='blue')
+ax6_twin.tick_params(axis='y', labelcolor='blue')
+ax6.set_title("Client Acquisition: Actual vs Required Marketing Budget")
+
+# Combine legends
+lines1, labels1 = ax6.get_legend_handles_labels()
+lines2, labels2 = ax6_twin.get_legend_handles_labels()
+ax6.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+ax6.grid(True, alpha=0.3, axis='y')
+st.pyplot(fig6)
+
+# Marketing budget analysis
+total_required_budget = sum(required_marketing_budget)
+total_actual_budget = monthly_marketing_budget * months_to_simulate
+budget_surplus_deficit = total_actual_budget - total_required_budget
+
+if budget_surplus_deficit < 0:
+    st.error(f"""
+    ⚠️ **Marketing Budget Shortfall**: ${abs(budget_surplus_deficit):,.0f}
+    
+    Your marketing budget of ${monthly_marketing_budget:,.0f}/month is insufficient to acquire the clients you need.
+    - **Total required over {months_to_simulate} months**: ${total_required_budget:,.0f}
+    - **Your budget**: ${total_actual_budget:,.0f}
+    - **Shortfall**: ${abs(budget_surplus_deficit):,.0f}
+    
+    **Impact**: You're growing slower than needed to fill capacity and replace churn.
+    
+    **Solutions**:
+    - Increase marketing budget to ${(total_required_budget / months_to_simulate):,.0f}/month
+    - Reduce client acquisition cost (improve conversion rates, cheaper channels)
+    - Accept slower growth
+    """)
+elif budget_surplus_deficit > total_actual_budget * 0.1:  # More than 10% surplus
+    st.info(f"""
+    💰 **Marketing Budget Surplus**: ${budget_surplus_deficit:,.0f}
+    
+    Your marketing budget of ${monthly_marketing_budget:,.0f}/month exceeds what's needed.
+    - **Total required over {months_to_simulate} months**: ${total_required_budget:,.0f}
+    - **Your budget**: ${total_actual_budget:,.0f}
+    - **Surplus**: ${budget_surplus_deficit:,.0f}
+    
+    **Consider**:
+    - Reducing budget to ${(total_required_budget / months_to_simulate):,.0f}/month and reallocating funds
+    - Investing in reducing acquisition cost (better marketing, referral programs)
+    - Keeping surplus as buffer for seasonal fluctuations
+    """)
+else:
+    st.success(f"""
+    ✅ **Marketing Budget Well-Calibrated**: ${monthly_marketing_budget:,.0f}/month
+    
+    Your marketing budget closely matches requirements.
+    - **Total required over {months_to_simulate} months**: ${total_required_budget:,.0f}
+    - **Your budget**: ${total_actual_budget:,.0f}
+    - **Buffer**: ${budget_surplus_deficit:,.0f}
+    """)
+
+st.header("Marketing Budget Analysis")
+
+# Create detailed monthly breakdown
+marketing_analysis_df = pd.DataFrame({
+    "Month": range(1, months_to_simulate + 1),
+    "New Clients Needed": np.round(new_clients_per_month, 2),
+    "Required Budget ($)": np.round(required_marketing_budget, 2),
+    "Actual Budget ($)": monthly_marketing_budget,
+    "Surplus/Deficit ($)": np.round([monthly_marketing_budget - req for req in required_marketing_budget], 2),
+    "% of Budget Used": np.round([req / monthly_marketing_budget * 100 if monthly_marketing_budget > 0 else 0 
+                                   for req in required_marketing_budget], 1)
+})
+
+st.dataframe(marketing_analysis_df, use_container_width=True)
+
+# Visual breakdown
+fig_budget, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(14, 5))
+
+# Left: Required vs Actual Budget by Month
+ax_left.plot(months, required_marketing_budget, marker='o', linewidth=2, label='Required Budget', color='blue')
+ax_left.axhline(y=monthly_marketing_budget, linestyle='--', linewidth=2, label='Actual Budget', color='purple')
+ax_left.fill_between(months, required_marketing_budget, monthly_marketing_budget, 
+                       where=[req <= monthly_marketing_budget for req in required_marketing_budget],
+                       color='green', alpha=0.2, label='Surplus')
+ax_left.fill_between(months, required_marketing_budget, monthly_marketing_budget,
+                       where=[req > monthly_marketing_budget for req in required_marketing_budget],
+                       color='red', alpha=0.2, label='Deficit')
+ax_left.set_xlabel("Month")
+ax_left.set_ylabel("Budget ($)")
+ax_left.set_title("Required vs Actual Marketing Budget")
+ax_left.legend()
+ax_left.grid(True, alpha=0.3)
+
+# Right: Budget Utilization %
+budget_utilization = [req / monthly_marketing_budget * 100 if monthly_marketing_budget > 0 else 0 
+                      for req in required_marketing_budget]
+colors = ['green' if u <= 100 else 'red' for u in budget_utilization]
+ax_right.bar(months, budget_utilization, color=colors, alpha=0.7)
+ax_right.axhline(y=100, color='black', linestyle='--', linewidth=2, label='100% Utilization')
+ax_right.set_xlabel("Month")
+ax_right.set_ylabel("Budget Utilization (%)")
+ax_right.set_title("Marketing Budget Utilization by Month")
+ax_right.legend()
+ax_right.grid(True, alpha=0.3, axis='y')
+
+st.pyplot(fig_budget)
+
+# Summary metrics
+col1, col2, col3, col4 = st.columns(4)
+avg_required = np.mean(required_marketing_budget)
+max_required = np.max(required_marketing_budget)
+min_required = np.min(required_marketing_budget)
+avg_utilization = np.mean(budget_utilization)
+
+col1.metric("Avg Required/Month", f"${avg_required:,.0f}")
+col2.metric("Peak Required", f"${max_required:,.0f}")
+col3.metric("Minimum Required", f"${min_required:,.0f}")
+col4.metric("Avg Utilization", f"{avg_utilization:.1f}%")
+
+# Optimization suggestions
+st.subheader("💡 Marketing Budget Optimization")
+
+if avg_utilization < 70:
+    optimized_budget = avg_required * 1.1  # 10% buffer
+    savings = (monthly_marketing_budget - optimized_budget) * months_to_simulate
+    st.info(f"""
+    **Budget Optimization Opportunity**
+    
+    Your average budget utilization is only {avg_utilization:.1f}%. You could reduce your monthly marketing budget from 
+    ${monthly_marketing_budget:,.0f} to ${optimized_budget:,.0f} and save ${savings:,.0f} over {months_to_simulate} months.
+    
+    This optimized budget includes a 10% buffer for safety.
+    """)
+elif avg_utilization > 100:
+    recommended_budget = max_required * 1.15  # 15% buffer for peak months
+    shortfall = (recommended_budget - monthly_marketing_budget) * months_to_simulate
+    st.warning(f"""
+    **Budget Increase Recommended**
+    
+    Your budget is insufficient. Peak month requires ${max_required:,.0f}, but you're budgeting ${monthly_marketing_budget:,.0f}.
+    
+    **Recommended**: Increase to ${recommended_budget:,.0f}/month (includes 15% buffer for peak months)
+    
+    This would cost an additional ${shortfall:,.0f} over {months_to_simulate} months but ensure you can acquire needed clients.
+    """)
+else:
+    st.success(f"""
+    **Budget is Well-Sized**
+    
+    Your marketing budget of ${monthly_marketing_budget:,.0f}/month is appropriate for your needs 
+    (average utilization: {avg_utilization:.1f}%).
+    """)
 
 st.header("Profit Distribution (Monte Carlo Simulation)")
 simulated_profits = []
@@ -314,20 +525,8 @@ if num_therapists > 0 and len(profit_per_therapist) > 0:
     ax5.grid(True, alpha=0.3)
     st.pyplot(fig5)
 
-st.header("Client Acquisition Metrics")
-fig6, ax6 = plt.subplots(figsize=(10, 5))
-months = range(1, months_to_simulate + 1)
-ax6.bar(months, new_clients_per_month, label='New Clients', color='green', alpha=0.7)
-ax6.bar(months, churned_clients_per_month, label='Churned Clients', color='red', alpha=0.7)
-ax6.set_xlabel("Month")
-ax6.set_ylabel("Number of Clients")
-ax6.set_title("New vs Churned Clients by Month")
-ax6.legend()
-ax6.grid(True, alpha=0.3, axis='y')
-st.pyplot(fig6)
-
 # Summary statistics
-st.header("Summary Statistics")
+st.header("Financial Summary Statistics")
 col1, col2, col3 = st.columns(3)
 
 with col1:
