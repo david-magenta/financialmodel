@@ -115,10 +115,17 @@ for month in range(1, months_to_simulate + 1):
     max_new_clients_marketing = monthly_marketing_budget / client_acquisition_cost if client_acquisition_cost > 0 else 0
     capacity_available = max(0, max_capacity_in_clients - surviving_clients)  # How many clients can we add?
     
-    # Acquire as many as marketing budget allows, up to available capacity
-    # Note: capacity_available already accounts for churn (it's max - surviving)
+    # Calculate IDEAL new clients (what we should acquire if budget wasn't a constraint)
+    ideal_new_clients = capacity_available  # Fill to capacity
+    
+    # Calculate ACTUAL new clients (limited by marketing budget)
     new_clients = min(max_new_clients_marketing, capacity_available)
     new_clients_per_month.append(new_clients)
+    
+    # Store ideal for comparison
+    if 'ideal_new_clients_per_month' not in locals():
+        ideal_new_clients_per_month = []
+    ideal_new_clients_per_month.append(ideal_new_clients)
 
     # Total active clients
     total_clients = surviving_clients + new_clients
@@ -329,11 +336,17 @@ st.header("Client Acquisition Metrics")
 fig6, ax6 = plt.subplots(figsize=(10, 5))
 months = range(1, months_to_simulate + 1)
 
-# Calculate required marketing budget per month
+# Calculate required marketing budget per month (what we SHOULD spend to grow optimally)
 required_marketing_budget = []
-for idx, new_clients_count in enumerate(new_clients_per_month):
-    required_budget = new_clients_count * client_acquisition_cost
+actual_marketing_spent = []
+for idx, (new_clients_count, ideal_clients) in enumerate(zip(new_clients_per_month, ideal_new_clients_per_month)):
+    # Required = what we'd need to acquire all available capacity
+    required_budget = ideal_clients * client_acquisition_cost
     required_marketing_budget.append(required_budget)
+    
+    # Actual = what we actually spent (based on new clients we could afford)
+    actual_spent = new_clients_count * client_acquisition_cost
+    actual_marketing_spent.append(actual_spent)
 
 # Create dual-axis chart
 ax6_twin = ax6.twinx()
@@ -344,20 +357,21 @@ positions = np.array(months)
 ax6.bar(positions - bar_width/2, new_clients_per_month, bar_width, label='New Clients Acquired', color='green', alpha=0.7)
 ax6.bar(positions + bar_width/2, churned_clients_per_month, bar_width, label='Churned Clients', color='red', alpha=0.7)
 
-# Line chart for budget
-ax6_twin.plot(months, required_marketing_budget, color='blue', marker='o', linewidth=2, label='Required Budget', markersize=4)
-ax6_twin.axhline(y=monthly_marketing_budget, color='purple', linestyle='--', linewidth=2, label=f'Actual Budget (${monthly_marketing_budget:,.0f})')
+# Line chart for budget - FIXED: Show required (ideal) vs actual budget allocated
+ax6_twin.plot(months, required_marketing_budget, color='blue', marker='o', linewidth=2, label='Required for Optimal Growth', markersize=4)
+ax6_twin.plot(months, actual_marketing_spent, color='orange', marker='s', linewidth=2, label='Actually Spent', markersize=4)
+ax6_twin.axhline(y=monthly_marketing_budget, color='purple', linestyle='--', linewidth=2, label=f'Budget Allocated (${monthly_marketing_budget:,.0f})')
 
 ax6.set_xlabel("Month")
 ax6.set_ylabel("Number of Clients", color='black')
 ax6_twin.set_ylabel("Marketing Budget ($)", color='blue')
 ax6_twin.tick_params(axis='y', labelcolor='blue')
-ax6.set_title("Client Acquisition: Actual vs Required Marketing Budget")
+ax6.set_title("Client Acquisition: Required vs Allocated vs Spent Marketing Budget")
 
 # Combine legends
 lines1, labels1 = ax6.get_legend_handles_labels()
 lines2, labels2 = ax6_twin.get_legend_handles_labels()
-ax6.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+ax6.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=8)
 ax6.grid(True, alpha=0.3, axis='y')
 st.pyplot(fig6)
 
