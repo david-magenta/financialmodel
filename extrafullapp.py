@@ -339,6 +339,7 @@ from typing import List, Dict
 
 st.set_page_config(page_title="Therapy Practice Dashboard V2", layout="wide")
 st.title("🧠 Therapy Practice Financial Dashboard - Professional Edition")
+st.markdown("Virtual practice financial modeling with therapist scaling, credential mix optimization, and strategic recommendations")
 
 # ==========================================
 # DATA STRUCTURES
