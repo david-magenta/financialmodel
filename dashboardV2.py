@@ -13,7 +13,6 @@ st.markdown("Enhanced decision support for practice owners")
 # CONSTANTS
 # ==========================================
 
-WEEKS_PER_MONTH = 52 / 12  # 4.33 weeks per month
 MONTHS_PER_YEAR = 12
 OWNER_SUPERVISION_CAPACITY = 3  # Max LMSW owner can supervise
 EXTERNAL_SUPERVISION_COST_PER_LMSW = 200.0  # $/month
@@ -299,6 +298,18 @@ starting_cash_balance = st.sidebar.number_input(
     help="Cash you're starting with"
 )
 
+st.sidebar.header("📅 Working Schedule")
+working_weeks_per_year = st.sidebar.number_input(
+    "Working Weeks per Year",
+    min_value=40,
+    max_value=52,
+    value=45,
+    help="Account for vacation, holidays, sick time. 45 weeks = ~7 weeks off"
+)
+
+# Calculate weeks per month based on working weeks
+WEEKS_PER_MONTH = working_weeks_per_year / 12
+
 st.sidebar.header("👤 Owner")
 owner_sessions_per_week = st.sidebar.number_input("Your Sessions/Week", min_value=0, value=20)
 owner_utilization = st.sidebar.slider("Your Utilization (%)", 0, 100, 85) / 100
@@ -454,8 +465,13 @@ assert avg_sess_mo > 0, "Sessions/client must be positive"
 # SIMULATION
 # ==========================================
 
+# Calculate owner's starting caseload
+owner = therapists[0]
+owner_capacity_sessions_month1 = owner.sessions_per_week_target * owner.utilization_rate * WEEKS_PER_MONTH
+owner_initial_clients = owner_capacity_sessions_month1 / avg_sess_mo if avg_sess_mo > 0 else 0
+
 monthly_data = []
-active_clients = 0.0
+active_clients = owner_initial_clients  # Start with owner's existing caseload
 revenue_history = {p: [] for p in payer_mix.keys()}
 months_in_op = 0
 cumulative_hiring = 0.0
@@ -774,6 +790,134 @@ st.dataframe(proj.style.format({
     'monthly_profit': '${:,.0f}',
     'cumulative_profit': '${:,.0f}'
 }), use_container_width=True)
+
+st.markdown("---")
+
+# PER-THERAPIST PERFORMANCE CARDS
+st.header("👥 Individual Therapist Performance")
+
+st.markdown("**Detailed profit & loss for each therapist by year**")
+
+# Build therapist performance data
+therapist_performance = {}
+
+for therapist in therapists:
+    if therapist.hire_month == 0 and therapist.id != 0:
+        continue  # Skip disabled therapist slots
+    
+    therapist_performance[therapist.name] = {}
+    
+    for year_num in range(1, (sim_months // 12) + 2):
+        start_month = (year_num - 1) * 12 + 1
+        end_month = min(year_num * 12, sim_months)
+        
+        if start_month <= sim_months:
+            months_active = [m for m in range(start_month, end_month + 1) if therapist.is_active(m)]
+            
+            if len(months_active) > 0:
+                # Calculate sessions and revenue
+                total_sessions = sum([therapist.get_sessions_per_month(m) for m in months_active])
+                billable_sessions = total_sessions * (1 - cancel_rate) * (1 - noshow_rate)
+                revenue = billable_sessions * weighted_rate
+                
+                # Direct costs (therapist pay)
+                if therapist.credential == "LMSW":
+                    pay_rate = lmsw_pay
+                else:
+                    pay_rate = lcsw_pay
+                
+                if therapist.id == 0 and owner_takes_pay:
+                    direct_pay = total_sessions * (1 - cancel_rate) * pay_rate * (1 + payroll_tax)
+                else:
+                    direct_pay = total_sessions * (1 - cancel_rate) * pay_rate * (1 + payroll_tax)
+                
+                gross_margin = revenue - direct_pay
+                gross_margin_pct = (gross_margin / revenue * 100) if revenue > 0 else 0
+                
+                # Allocated costs
+                year_data = df[(df['month'] >= start_month) & (df['month'] <= end_month)]
+                avg_therapists = year_data['active_therapists'].mean()
+                
+                overhead_per_month = (other_overhead + telehealth + other_tech) / avg_therapists if avg_therapists > 0 else 0
+                overhead_allocated = overhead_per_month * len(months_active)
+                
+                # Supervision costs
+                if therapist.credential == "LMSW":
+                    supervision_allocated = 200 * len(months_active)  # Simplified
+                else:
+                    supervision_allocated = 0
+                
+                # Marketing allocation (proportional to capacity)
+                total_marketing = year_data['marketing_spent'].sum()
+                total_capacity = year_data['total_capacity_sessions'].sum()
+                therapist_capacity_pct = total_sessions / total_capacity if total_capacity > 0 else 0
+                marketing_allocated = total_marketing * therapist_capacity_pct
+                
+                # Tech costs
+                tech_allocated = 150 * len(months_active)  # Simplified EHR cost
+                
+                total_allocated = overhead_allocated + supervision_allocated + marketing_allocated + tech_allocated
+                
+                net_margin = gross_margin - total_allocated
+                net_margin_pct = (net_margin / revenue * 100) if revenue > 0 else 0
+                
+                therapist_performance[therapist.name][f"Year {year_num}"] = {
+                    'credential': therapist.credential,
+                    'months_active': len(months_active),
+                    'sessions': billable_sessions,
+                    'revenue': revenue,
+                    'direct_pay': direct_pay,
+                    'gross_margin': gross_margin,
+                    'gross_margin_pct': gross_margin_pct,
+                    'overhead': overhead_allocated,
+                    'supervision': supervision_allocated,
+                    'marketing': marketing_allocated,
+                    'tech': tech_allocated,
+                    'total_allocated': total_allocated,
+                    'net_margin': net_margin,
+                    'net_margin_pct': net_margin_pct
+                }
+
+# Display therapist cards
+for therapist_name, years in therapist_performance.items():
+    if not years:
+        continue
+    
+    st.markdown(f"### {therapist_name}")
+    
+    # Create columns for each year this therapist was active
+    year_cols = st.columns(len(years))
+    
+    for idx, (year_label, data) in enumerate(years.items()):
+        with year_cols[idx]:
+            st.markdown(f"**{year_label}** ({data['credential']}, {data['months_active']}mo)")
+            
+            st.metric("Revenue", f"${data['revenue']:,.0f}")
+            st.metric("Gross Margin", f"${data['gross_margin']:,.0f}", 
+                     delta=f"{data['gross_margin_pct']:.1f}%")
+            
+            with st.expander("Cost Detail"):
+                st.markdown(f"""
+                **Direct Costs:**
+                - Therapist Pay: ${data['direct_pay']:,.0f}
+                
+                **Allocated Costs:**
+                - Overhead: ${data['overhead']:,.0f}
+                - Supervision: ${data['supervision']:,.0f}
+                - Marketing: ${data['marketing']:,.0f}
+                - Technology: ${data['tech']:,.0f}
+                - **Total**: ${data['total_allocated']:,.0f}
+                """)
+            
+            # Net margin with color coding
+            if data['net_margin'] > 0:
+                st.success(f"**Net Margin:** ${data['net_margin']:,.0f} ({data['net_margin_pct']:.1f}%)")
+            else:
+                st.error(f"**Net Margin:** ${data['net_margin']:,.0f} ({data['net_margin_pct']:.1f}%)")
+            
+            st.markdown(f"_Sessions: {data['sessions']:.0f}_")
+    
+    st.markdown("---")
 
 st.markdown("---")
 
