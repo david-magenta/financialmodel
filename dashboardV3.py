@@ -4,11 +4,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
-import random
 
-st.set_page_config(page_title="Therapy Practice Financial Model V4.2", layout="wide")
-st.title("🧠 Therapy Practice Financial Model V4.2")
-st.markdown("Enhanced with realistic turnover, marketing efficiency, and seasonality")
+st.set_page_config(page_title="Therapy Practice Financial Model V4.3", layout="wide")
+st.title("🧠 Therapy Practice Financial Model V4.3")
+st.markdown("Accurate projections with proper session allocation and marketing efficiency")
 
 # ==========================================
 # CONSTANTS
@@ -34,14 +33,9 @@ class Therapist:
     sessions_per_week_target: int
     utilization_rate: float
     one_time_hiring_cost: float = 0.0
-    quit_month: int = 0  # 0 means hasn't quit
-    is_replacement: bool = False
-    replaced_id: int = -1  # ID of therapist this one replaced
     
     def is_active(self, current_month: int) -> bool:
-        """Therapist is active if hired and hasn't quit yet"""
-        if self.quit_month > 0 and current_month >= self.quit_month:
-            return False
+        """Therapist is active immediately when hired (already credentialed)"""
         return current_month >= self.hire_month
     
     def get_capacity_percentage(self, current_month: int, ramp_speed: str = "Medium") -> float:
@@ -54,21 +48,15 @@ class Therapist:
         # Different ramp schedules
         if ramp_speed == "Slow":
             schedule = [0.10, 0.30, 0.50, 0.70, 0.85, 1.0]
-            months_to_full = 6
         elif ramp_speed == "Fast":
             schedule = [0.30, 0.60, 0.85, 1.0]
-            months_to_full = 4
         else:  # Medium
             schedule = [0.20, 0.40, 0.60, 0.80, 1.0]
-            months_to_full = 5
         
         if months_since_hire >= len(schedule):
             return 1.0
         else:
-            # Add small random variation (±5%)
-            base = schedule[months_since_hire]
-            variation = random.uniform(-0.05, 0.05) * base
-            return min(1.0, max(0.05, base + variation))
+            return schedule[months_since_hire]
     
     def get_sessions_per_month(self, current_month: int, weeks_per_month: float, ramp_speed: str = "Medium") -> float:
         """Calculate actual sessions per month"""
@@ -512,14 +500,6 @@ churn2 = st.sidebar.slider("Month 2 Churn %", 0, 50, 15) / 100
 churn3 = st.sidebar.slider("Month 3 Churn %", 0, 50, 10) / 100
 churn_ongoing = st.sidebar.slider("Ongoing Churn %", 0, 20, 5) / 100
 
-st.sidebar.header("🔄 Therapist Turnover")
-annual_turnover_rate = st.sidebar.slider("Annual Turnover %", 0, 50, 20,
-    help="% of therapists who quit per year (industry avg: 20-30%)") / 100
-turnover_client_loss_immediate = st.sidebar.slider("Client Loss - Immediate %", 0, 100, 50,
-    help="% of clients lost immediately when therapist quits") / 100
-turnover_client_loss_month2 = st.sidebar.slider("Client Loss - Month 2 %", 0, 100, 50,
-    help="% of remaining clients lost in second month") / 100
-
 st.sidebar.header("🧑‍🎓 Client Behavior")
 avg_sess_mo = st.sidebar.number_input("Sessions/Client/Month", value=3.2, step=0.1)
 cancel_rate = st.sidebar.slider("Cancellation %", 0, 40, 20) / 100
@@ -543,12 +523,6 @@ if do_groups:
 
 st.sidebar.header("⚙️ Simulation")
 sim_months = st.sidebar.number_input("Months", 12, 60, value=24)
-random_seed = st.sidebar.number_input("Random Seed", 0, 9999, 42,
-    help="Change for different turnover scenarios")
-
-# Set random seed for reproducibility
-random.seed(random_seed)
-np.random.seed(random_seed)
 
 # Input validation
 assert 0 <= cancel_rate <= 1, "Cancellation rate must be 0-100%"
@@ -574,11 +548,10 @@ cumulative_hiring = 0.0
 hired_tracker = set()
 owner_sess_value = weighted_rate * (1 - noshow_rate) * (1 - cancel_rate) * (1 - revenue_loss_pct)
 marketing_pipeline = []  # Track leads in pipeline
-turnover_events = []  # Track who quit when
-therapist_replacements = []  # Track replacement hires
 
-# Calculate monthly turnover probability
-monthly_turnover_prob = 1 - (1 - annual_turnover_rate) ** (1/12) if annual_turnover_rate > 0 else 0
+# Track which clients belong to which therapist
+therapist_clients = {t.id: 0 for t in therapists}
+therapist_clients[0] = owner_initial_clients  # Owner starts with full caseload
 
 for month in range(1, sim_months + 1):
     month_data = {"month": month}
@@ -587,66 +560,19 @@ for month in range(1, sim_months + 1):
     # Get seasonality factors
     demand_factor, attendance_factor = get_seasonality_factor(month, apply_seasonality)
     
-    # Check for therapist turnover (not owner)
-    month_turnover_events = []
-    clients_lost_to_turnover = 0
-    
-    for t in therapists[1:]:  # Skip owner
-        if t.is_active(month) and t.quit_month == 0:
-            # Check if therapist quits this month
-            if random.random() < monthly_turnover_prob:
-                t.quit_month = month
-                
-                # Calculate client loss
-                t_sessions = t.get_sessions_per_month(month, WEEKS_PER_MONTH, ramp_speed)
-                t_clients = t_sessions / avg_sess_mo if avg_sess_mo > 0 else 0
-                
-                # Immediate client loss
-                immediate_loss = t_clients * turnover_client_loss_immediate
-                clients_lost_to_turnover += immediate_loss
-                
-                # Schedule remaining client loss for next month
-                remaining_clients = t_clients - immediate_loss
-                
-                # Create replacement hire (2 months later)
-                replacement_month = month + 2
-                replacement = Therapist(
-                    id=100 + len(therapist_replacements),
-                    name=f"{t.name} Replacement",
-                    credential=t.credential,
-                    hire_month=replacement_month,
-                    sessions_per_week_target=t.sessions_per_week_target,
-                    utilization_rate=t.utilization_rate,
-                    one_time_hiring_cost=t.one_time_hiring_cost,
-                    is_replacement=True,
-                    replaced_id=t.id
-                )
-                therapist_replacements.append(replacement)
-                therapists.append(replacement)
-                
-                # Record event
-                event = {
-                    'month': month,
-                    'therapist': t.name,
-                    'credential': t.credential,
-                    'clients_lost': t_clients,
-                    'replacement_month': replacement_month
-                }
-                month_turnover_events.append(event)
-                turnover_events.append(event)
-    
-    # Process delayed client loss from previous month's turnover
-    for event in turnover_events:
-        if event['month'] == month - 1:
-            delayed_loss = event['clients_lost'] * turnover_client_loss_month2
-            clients_lost_to_turnover += delayed_loss
-    
-    month_data["turnover_events"] = month_turnover_events
-    month_data["clients_lost_to_turnover"] = clients_lost_to_turnover
-    
     # Calculate active therapists and capacity
     active_ther = [t for t in therapists if t.is_active(month)]
-    total_cap_sess = sum(t.get_sessions_per_month(month, WEEKS_PER_MONTH, ramp_speed) for t in therapists)
+    
+    # Calculate capacity for each therapist
+    therapist_capacity = {}
+    for t in therapists:
+        if t.is_active(month):
+            sess = t.get_sessions_per_month(month, WEEKS_PER_MONTH, ramp_speed)
+            therapist_capacity[t.id] = sess / avg_sess_mo if avg_sess_mo > 0 else 0
+        else:
+            therapist_capacity[t.id] = 0
+    
+    total_cap_sess = sum(t.get_sessions_per_month(month, WEEKS_PER_MONTH, ramp_speed) for t in therapists if t.is_active(month))
     
     # Apply attendance seasonality to capacity
     total_cap_sess *= attendance_factor
@@ -661,9 +587,13 @@ for month in range(1, sim_months + 1):
     month_data["total_capacity_sessions"] = total_cap_sess
     month_data["total_capacity_clients"] = total_cap_clients
     
-    # Client flow
-    churned = apply_monthly_churn(active_clients, months_in_op, churn1, churn2, churn3, churn_ongoing)
-    surviving = max(0, active_clients - churned - clients_lost_to_turnover)
+    # Client churn - apply to each therapist's clients
+    for t_id in therapist_clients:
+        if therapist_clients[t_id] > 0:
+            churned = apply_monthly_churn(therapist_clients[t_id], months_in_op, churn1, churn2, churn3, churn_ongoing)
+            therapist_clients[t_id] = max(0, therapist_clients[t_id] - churned)
+    
+    active_clients = sum(therapist_clients.values())
     
     # Marketing budget calculation
     if mkt_model == "Fixed Monthly":
@@ -671,7 +601,7 @@ for month in range(1, sim_months + 1):
     elif mkt_model == "Per Active Therapist":
         mkt_budget = base_mkt + (len(active_ther) * mkt_per_therapist)
     else:  # Per Empty Slot
-        empty = max(0, total_cap_clients - surviving)
+        empty = max(0, total_cap_clients - active_clients)
         mkt_budget = empty * mkt_per_slot
     
     # Apply demand seasonality to marketing effectiveness
@@ -679,13 +609,26 @@ for month in range(1, sim_months + 1):
     
     # Process marketing pipeline (with lag)
     marketing_lag_months = marketing_lag_weeks / 4.33
-    new_clients_from_pipeline = 0
+    new_clients_total = 0
     
     if month > marketing_lag_months and len(marketing_pipeline) > int(marketing_lag_months):
-        new_clients_from_pipeline = marketing_pipeline.pop(0)
+        new_clients_total = marketing_pipeline.pop(0)
+    
+    # Allocate new clients to therapists with capacity
+    remaining_new = new_clients_total
+    for t in therapists:
+        if t.is_active(month) and remaining_new > 0:
+            t_cap = therapist_capacity[t.id]
+            t_current = therapist_clients[t.id]
+            t_space = max(0, t_cap - t_current)
+            
+            if t_space > 0:
+                allocated = min(t_space, remaining_new)
+                therapist_clients[t.id] += allocated
+                remaining_new -= allocated
     
     # Calculate new clients to add to pipeline
-    cap_avail = max(0, total_cap_clients - surviving - new_clients_from_pipeline)
+    cap_avail = max(0, total_cap_clients - sum(therapist_clients.values()))
     max_new_from_budget = effective_mkt_budget / cac_target if cac_target > 0 else 0
     new_to_pipeline = min(max_new_from_budget, cap_avail)
     
@@ -695,18 +638,24 @@ for month in range(1, sim_months + 1):
     
     marketing_pipeline.append(new_to_pipeline)
     
-    active_clients = surviving + new_clients_from_pipeline
+    active_clients = sum(therapist_clients.values())
     
-    month_data["churned_clients"] = churned
-    month_data["new_clients"] = new_clients_from_pipeline
+    month_data["new_clients"] = new_clients_total
     month_data["active_clients"] = active_clients
     month_data["capacity_utilization"] = (active_clients / total_cap_clients * 100) if total_cap_clients > 0 else 0
     month_data["marketing_budget"] = mkt_budget
     month_data["marketing_spent"] = actual_mkt_spent
     month_data["marketing_saved"] = marketing_savings
     
-    # Sessions and revenue
-    sched_sess = active_clients * avg_sess_mo * attendance_factor
+    # Sessions and revenue - now based on each therapist's actual clients
+    total_sched_sess = 0
+    for t in therapists:
+        if t.is_active(month):
+            t_clients = therapist_clients[t.id]
+            t_sessions = t_clients * avg_sess_mo * attendance_factor
+            total_sched_sess += t_sessions
+    
+    sched_sess = total_sched_sess
     actual_sess = sched_sess * (1 - cancel_rate)
     billable_sess = actual_sess * (1 - noshow_rate)
     
@@ -738,38 +687,44 @@ for month in range(1, sim_months + 1):
     collections = calculate_collections(revenue_history, month, payer_mix, copay_rev, cc_fees)
     month_data["collections"] = collections
     
-    # Therapist costs (FIXED: pay for scheduled sessions)
-    ther_cost_pre = 0.0
-    owner_pay_pre = 0.0
+    # FIXED: Therapist costs - each therapist paid for their own clients' sessions
+    ther_cost_total = 0.0
+    owner_pay_salary = 0.0  # What owner actually receives
+    owner_pay_tax = 0.0     # Payroll tax on owner salary
     
     for t in therapists:
         if t.is_active(month):
-            t_sess = t.get_sessions_per_month(month, WEEKS_PER_MONTH, ramp_speed)
-            # Allocate sessions proportionally
-            if total_cap_sess > 0:
-                t_actual = (t_sess / total_cap_sess) * actual_sess
-            else:
-                t_actual = 0
+            # Each therapist gets paid for their own clients
+            t_clients = therapist_clients[t.id]
+            t_sessions = t_clients * avg_sess_mo * attendance_factor
+            t_scheduled = t_sessions * (1 - cancel_rate)
             
-            # CRITICAL FIX: Therapists paid for scheduled sessions (not completed)
-            t_scheduled = (t_sess / total_cap_sess * sched_sess) if total_cap_sess > 0 else 0
-            t_scheduled_after_cancel = t_scheduled * (1 - cancel_rate)
-            
-            pay = t_scheduled_after_cancel * (lmsw_pay if t.credential == "LMSW" else lcsw_pay)
+            pay_rate = lmsw_pay if t.credential == "LMSW" else lcsw_pay
+            gross_pay = t_scheduled * pay_rate
             
             if t.id == 0 and owner_takes_pay:
-                owner_pay_pre = pay
+                # Owner gets the salary, practice pays the tax
+                owner_pay_salary = gross_pay
+                owner_pay_tax = gross_pay * payroll_tax
             else:
-                ther_cost_pre += pay
+                # For employees, total cost includes payroll tax
+                ther_cost_total += gross_pay * (1 + payroll_tax)
     
-    ther_cost = ther_cost_pre * (1 + payroll_tax)
-    owner_pay = owner_pay_pre * (1 + payroll_tax)
+    # Total owner compensation cost to practice (salary + tax)
+    owner_total_cost = owner_pay_salary + owner_pay_tax
     
-    # Supervision costs (FIXED: opportunity cost model)
+    month_data["therapist_costs"] = ther_cost_total
+    month_data["owner_therapist_pay"] = owner_pay_salary  # FIXED: Show actual salary, not including tax
+    month_data["owner_payroll_tax"] = owner_pay_tax
+    month_data["owner_total_cost"] = owner_total_cost
+    
+    # Supervision costs (opportunity cost model)
     sup_cost, ext_sup, own_sup, ext_sup_count = calculate_supervision_costs(
         lmsw_count, owner_sess_value, WEEKS_PER_MONTH
     )
     
+    month_data["supervision_cost"] = sup_cost
+    month_data["external_supervision_cost"] = ext_sup
     month_data["owner_supervised_count"] = own_sup
     month_data["external_supervised_count"] = ext_sup_count
     
@@ -807,14 +762,10 @@ for month in range(1, sim_months + 1):
     month_data["one_time_hiring_costs"] = hiring_this_mo
     month_data["cumulative_hiring_costs"] = cumulative_hiring
     
-    # Total costs (marketing spent, not budget)
-    total_costs = (ther_cost + owner_pay + sup_cost + tech_cost + bill_cost + 
+    # Total costs (use owner_total_cost which includes salary + tax)
+    total_costs = (ther_cost_total + owner_total_cost + sup_cost + tech_cost + bill_cost + 
                   actual_mkt_spent + other_overhead + grp_cost + hiring_this_mo)
     
-    month_data["therapist_costs"] = ther_cost
-    month_data["owner_therapist_pay"] = owner_pay
-    month_data["supervision_cost"] = sup_cost
-    month_data["external_supervision_cost"] = ext_sup
     month_data["tech_cost"] = tech_cost
     month_data["billing_cost"] = bill_cost
     month_data["other_overhead"] = other_overhead
@@ -834,6 +785,9 @@ for month in range(1, sim_months + 1):
         month_data["cash_balance"] = starting_cash_balance + cash_flow
     else:
         month_data["cash_balance"] = monthly_data[-1]["cash_balance"] + cash_flow
+    
+    # Store therapist client counts for display
+    month_data["therapist_clients"] = therapist_clients.copy()
     
     monthly_data.append(month_data)
 
@@ -855,18 +809,7 @@ c5.metric("Cash Balance", f"${final['cash_balance']:,.0f}")
 
 st.markdown("---")
 
-# TURNOVER EVENTS LOG
-if turnover_events:
-    st.header("🔄 Therapist Turnover Events")
-    for event in turnover_events:
-        st.warning(f"Month {event['month']}: {event['therapist']} ({event['credential']}) quit - "
-                  f"Lost {event['clients_lost']:.0f} clients, replacement hired Month {event['replacement_month']}")
-else:
-    st.info("No therapist turnover occurred during simulation")
-
-st.markdown("---")
-
-# OWNER COMPENSATION BY YEAR
+# OWNER COMPENSATION BY YEAR (FIXED to show actual salary)
 st.header("💰 Owner Total Compensation by Year")
 
 years_comp = []
@@ -878,6 +821,7 @@ for yr in range(1, (sim_months // 12) + 2):
         yr_data = df[(df['month'] >= start) & (df['month'] <= end)]
         mo_in_yr = len(yr_data)
         
+        # FIXED: Use actual salary, not including payroll tax
         owner_salary = yr_data['owner_therapist_pay'].sum()
         biz_profit = yr_data['profit_accrual'].sum()
         total_comp = owner_salary + biz_profit
@@ -917,7 +861,7 @@ else:
 
 st.markdown("---")
 
-# MARKETING EFFICIENCY DASHBOARD (ENHANCED)
+# MARKETING EFFICIENCY DASHBOARD
 st.header("🎯 Marketing Efficiency Dashboard")
 
 avg_pay = lmsw_pay * 0.6 + lcsw_pay * 0.4
@@ -1032,22 +976,19 @@ st.dataframe(proj.style.format({
 
 st.markdown("---")
 
-# PER-THERAPIST PERFORMANCE CARDS (ENHANCED)
+# PER-THERAPIST PERFORMANCE CARDS
 st.header("👥 Individual Therapist Performance")
 
 st.markdown("**Detailed profit & loss for each therapist by year**")
 
-# Build therapist performance data
+# Build therapist performance data using actual client counts
 therapist_performance = {}
 
 for therapist in therapists:
     if therapist.hire_month == 0 and therapist.id != 0:
         continue  # Skip disabled therapist slots
     
-    therapist_performance[therapist.name] = {
-        'status': 'Active' if therapist.quit_month == 0 else f'Quit Month {therapist.quit_month}',
-        'is_replacement': therapist.is_replacement
-    }
+    therapist_performance[therapist.name] = {}
     
     for year_num in range(1, (sim_months // 12) + 2):
         start_month = (year_num - 1) * 12 + 1
@@ -1060,17 +1001,31 @@ for therapist in therapists:
                     months_active.append(m)
             
             if len(months_active) > 0:
-                # Calculate sessions and revenue
-                total_sessions = sum([therapist.get_sessions_per_month(m, WEEKS_PER_MONTH, ramp_speed) for m in months_active])
+                # Get actual sessions from therapist's client panel
+                total_sessions = 0
+                for m in months_active:
+                    month_idx = m - 1
+                    if month_idx < len(df):
+                        t_clients = df.iloc[month_idx]['therapist_clients'].get(therapist.id, 0)
+                        t_sessions = t_clients * avg_sess_mo
+                        total_sessions += t_sessions
+                
                 billable_sessions = total_sessions * (1 - cancel_rate) * (1 - noshow_rate)
                 revenue = billable_sessions * weighted_rate * (1 - revenue_loss_pct)
                 
                 # Direct costs
                 scheduled_for_pay = total_sessions * (1 - cancel_rate)
                 pay_rate = lmsw_pay if therapist.credential == "LMSW" else lcsw_pay
-                direct_pay = scheduled_for_pay * pay_rate * (1 + payroll_tax)
                 
-                gross_margin = revenue - direct_pay
+                # For owner, show actual salary; for others show total cost
+                if therapist.id == 0 and owner_takes_pay:
+                    direct_pay = scheduled_for_pay * pay_rate  # Just salary, no tax
+                    payroll_tax_amount = scheduled_for_pay * pay_rate * payroll_tax
+                else:
+                    direct_pay = scheduled_for_pay * pay_rate * (1 + payroll_tax)
+                    payroll_tax_amount = 0  # Included in direct_pay
+                
+                gross_margin = revenue - direct_pay - payroll_tax_amount
                 gross_margin_pct = (gross_margin / revenue * 100) if revenue > 0 else 0
                 
                 # Allocated costs
@@ -1080,7 +1035,8 @@ for therapist in therapists:
                 # Allocate marketing based on capacity
                 total_marketing = year_data['marketing_spent'].sum()
                 total_capacity = year_data['total_capacity_sessions'].sum()
-                therapist_capacity_pct = total_sessions / total_capacity if total_capacity > 0 else 0
+                therapist_capacity = sum([therapist.get_sessions_per_month(m, WEEKS_PER_MONTH, ramp_speed) for m in months_active])
+                therapist_capacity_pct = therapist_capacity / total_capacity if total_capacity > 0 else 0
                 marketing_allocated = total_marketing * therapist_capacity_pct
                 
                 # Other allocations
@@ -1106,6 +1062,7 @@ for therapist in therapists:
                     'sessions': billable_sessions,
                     'revenue': revenue,
                     'direct_pay': direct_pay,
+                    'payroll_tax': payroll_tax_amount,
                     'gross_margin': gross_margin,
                     'gross_margin_pct': gross_margin_pct,
                     'overhead': overhead_allocated,
@@ -1119,51 +1076,43 @@ for therapist in therapists:
 
 # Display therapist cards
 for therapist_name, data in therapist_performance.items():
-    if len(data) <= 2:  # Skip if only status info
+    if not data:
         continue
     
-    # Status badge
-    status = data['status']
-    if 'Quit' in status:
-        st.markdown(f"### {therapist_name} 🔴 {status}")
-    elif data['is_replacement']:
-        st.markdown(f"### {therapist_name} 🟡 Replacement Hire")
-    else:
-        st.markdown(f"### {therapist_name} 🟢 Active")
+    st.markdown(f"### {therapist_name}")
     
     # Year columns
-    year_data = {k: v for k, v in data.items() if 'Year' in k}
-    if year_data:
-        year_cols = st.columns(len(year_data))
-        
-        for idx, (year_label, year_info) in enumerate(year_data.items()):
-            with year_cols[idx]:
-                st.markdown(f"**{year_label}** ({year_info['credential']}, {year_info['months_active']}mo)")
+    year_cols = st.columns(len(data))
+    
+    for idx, (year_label, year_info) in enumerate(data.items()):
+        with year_cols[idx]:
+            st.markdown(f"**{year_label}** ({year_info['credential']}, {year_info['months_active']}mo)")
+            
+            st.metric("Revenue", f"${year_info['revenue']:,.0f}")
+            st.metric("Gross Margin", f"${year_info['gross_margin']:,.0f}", 
+                     delta=f"{year_info['gross_margin_pct']:.1f}%")
+            
+            with st.expander("Cost Detail"):
+                st.markdown(f"""
+                **Direct Costs:**
+                - {'Salary' if therapist_name == 'Owner' else 'Pay'}: ${year_info['direct_pay']:,.0f}
+                {f"- Payroll Tax: ${year_info['payroll_tax']:,.0f}" if year_info['payroll_tax'] > 0 else ""}
                 
-                st.metric("Revenue", f"${year_info['revenue']:,.0f}")
-                st.metric("Gross Margin", f"${year_info['gross_margin']:,.0f}", 
-                         delta=f"{year_info['gross_margin_pct']:.1f}%")
-                
-                with st.expander("Cost Detail"):
-                    st.markdown(f"""
-                    **Direct Costs:**
-                    - Therapist Pay: ${year_info['direct_pay']:,.0f}
-                    
-                    **Allocated Costs:**
-                    - Overhead: ${year_info['overhead']:,.0f}
-                    - Supervision: ${year_info['supervision']:,.0f}
-                    - Marketing: ${year_info['marketing']:,.0f}
-                    - Technology: ${year_info['tech']:,.0f}
-                    - **Total**: ${year_info['total_allocated']:,.0f}
-                    """)
-                
-                # Net margin with color coding
-                if year_info['net_margin'] > 0:
-                    st.success(f"**Net Margin:** ${year_info['net_margin']:,.0f} ({year_info['net_margin_pct']:.1f}%)")
-                else:
-                    st.error(f"**Net Margin:** ${year_info['net_margin']:,.0f} ({year_info['net_margin_pct']:.1f}%)")
-                
-                st.markdown(f"_Sessions: {year_info['sessions']:.0f}_")
+                **Allocated Costs:**
+                - Overhead: ${year_info['overhead']:,.0f}
+                - Supervision: ${year_info['supervision']:,.0f}
+                - Marketing: ${year_info['marketing']:,.0f}
+                - Technology: ${year_info['tech']:,.0f}
+                - **Total**: ${year_info['total_allocated']:,.0f}
+                """)
+            
+            # Net margin with color coding
+            if year_info['net_margin'] > 0:
+                st.success(f"**Net Margin:** ${year_info['net_margin']:,.0f} ({year_info['net_margin_pct']:.1f}%)")
+            else:
+                st.error(f"**Net Margin:** ${year_info['net_margin']:,.0f} ({year_info['net_margin_pct']:.1f}%)")
+            
+            st.markdown(f"_Sessions: {year_info['sessions']:.0f}_")
     
     st.markdown("---")
 
@@ -1248,15 +1197,10 @@ st.header("📈 Visual Analytics")
 
 fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
 
-# Chart 1: Clients vs Capacity with turnover markers
+# Chart 1: Clients vs Capacity
 ax1.plot(df["month"], df["active_clients"], 'o-', linewidth=2, label='Clients')
 ax1.plot(df["month"], df["total_capacity_clients"], '--', linewidth=2, label='Capacity')
 ax1.fill_between(df["month"], df["active_clients"], df["total_capacity_clients"], alpha=0.2)
-
-# Add turnover markers
-for event in turnover_events:
-    ax1.axvline(x=event['month'], color='red', alpha=0.3, linestyle=':', label='Turnover' if event == turnover_events[0] else '')
-
 ax1.set_title("Clients vs Capacity")
 ax1.set_xlabel("Month")
 ax1.legend()
@@ -1280,10 +1224,16 @@ ax3.set_title("Cash Balance")
 ax3.set_xlabel("Month")
 ax3.grid(True, alpha=0.3)
 
-# Chart 4: Cost Breakdown
-ax4.stackplot(df["month"], df["therapist_costs"], df["owner_therapist_pay"], df["supervision_cost"],
-              df["tech_cost"], df["marketing_spent"], df["other_overhead"],
-              labels=['Therapist', 'Owner', 'Supervision', 'Tech', 'Marketing', 'Other'], alpha=0.8)
+# Chart 4: Cost Breakdown (FIXED to use owner_total_cost)
+ax4.stackplot(df["month"], 
+              df["therapist_costs"], 
+              df["owner_total_cost"],  # Use total cost (salary + tax) for chart
+              df["supervision_cost"],
+              df["tech_cost"], 
+              df["marketing_spent"], 
+              df["other_overhead"],
+              labels=['Therapist', 'Owner', 'Supervision', 'Tech', 'Marketing', 'Other'], 
+              alpha=0.8)
 ax4.set_title("Cost Breakdown")
 ax4.set_xlabel("Month")
 ax4.legend(loc='upper left', fontsize=8)
@@ -1307,12 +1257,13 @@ with st.expander("📋 Detailed Monthly Data"):
     }), use_container_width=True)
 
 with st.expander("💰 Cost Breakdown Detail"):
-    cost_df = df[["month", "therapist_costs", "owner_therapist_pay", "supervision_cost", "tech_cost", 
-                  "billing_cost", "marketing_spent", "one_time_hiring_costs", "other_overhead", "total_costs"]]
+    cost_df = df[["month", "therapist_costs", "owner_therapist_pay", "owner_payroll_tax", "supervision_cost", 
+                  "tech_cost", "billing_cost", "marketing_spent", "one_time_hiring_costs", "other_overhead", "total_costs"]]
     st.dataframe(cost_df.style.format({
-        "therapist_costs": "${:,.0f}", "owner_therapist_pay": "${:,.0f}", "supervision_cost": "${:,.0f}",
-        "tech_cost": "${:,.0f}", "billing_cost": "${:,.0f}", "marketing_spent": "${:,.0f}",
-        "one_time_hiring_costs": "${:,.0f}", "other_overhead": "${:,.0f}", "total_costs": "${:,.0f}"
+        "therapist_costs": "${:,.0f}", "owner_therapist_pay": "${:,.0f}", "owner_payroll_tax": "${:,.0f}",
+        "supervision_cost": "${:,.0f}", "tech_cost": "${:,.0f}", "billing_cost": "${:,.0f}", 
+        "marketing_spent": "${:,.0f}", "one_time_hiring_costs": "${:,.0f}", "other_overhead": "${:,.0f}", 
+        "total_costs": "${:,.0f}"
     }), use_container_width=True)
 
 # SUPERVISION DETAIL
@@ -1334,6 +1285,6 @@ if df['active_lmsw'].max() > 0:
 st.markdown("---")
 st.header("📥 Export")
 csv = df.to_csv(index=False)
-st.download_button("Download CSV", csv, f"practice_model_v42_{sim_months}mo.csv", "text/csv")
+st.download_button("Download CSV", csv, f"practice_model_v43_{sim_months}mo.csv", "text/csv")
 
-st.success("✅ Model V4.2 Complete - All corrections applied")
+st.success("✅ Model V4.3 Complete - All critical fixes applied")
