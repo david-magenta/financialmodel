@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 from datetime import datetime
 import uuid
@@ -56,7 +56,9 @@ class Therapist:
     is_owner: bool = False
     
     def is_active(self, current_month: int) -> bool:
-        return current_month >= self.hire_month > 0
+        if self.hire_month == 0:  # Owner or pre-existing therapist
+            return True
+        return current_month >= self.hire_month
     
     def get_capacity_factor(self, current_month: int, ramp_speed: str) -> float:
         if not self.is_active(current_month):
@@ -140,6 +142,8 @@ class MonthlyMetrics:
     marketing_conversions: float = 0.0
     actual_cac: float = 0.0
     active_cohorts: int = 0
+    therapist_wages_breakdown: Dict[int, float] = field(default_factory=dict)
+    therapist_sessions_breakdown: Dict[int, float] = field(default_factory=dict)
     
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items()}
@@ -577,6 +581,11 @@ for month in range(1, simulation_months+1):
         therapist_completed = therapist_sessions * (1-cancellation_rate)
         pay_rate = lmsw_pay if therapist.credential == "LMSW" else lcsw_pay
         therapist_gross_pay = therapist_completed * pay_rate
+        
+        # Store per-therapist breakdown
+        metrics.therapist_wages_breakdown[therapist.id] = therapist_gross_pay
+        metrics.therapist_sessions_breakdown[therapist.id] = therapist_completed
+        
         if therapist.is_owner:
             owner_wages += therapist_gross_pay
         else:
@@ -684,6 +693,58 @@ for month in range(1, simulation_months+1):
     monthly_metrics.append(metrics)
 
 df = pd.DataFrame([m.to_dict() for m in monthly_metrics])
+
+# VERIFICATION FUNCTIONS
+def verify_owner_salary():
+    """Verify owner salary consistency across data sources"""
+    issues = []
+    for year in range(1, (simulation_months//12)+2):
+        start_m = (year-1)*12+1
+        end_m = min(year*12, simulation_months)
+        if start_m <= simulation_months:
+            year_data = df[(df['month']>=start_m) & (df['month']<=end_m)]
+            df_owner_wages = year_data['owner_wages'].sum()
+            
+            metrics_owner_wages = sum(monthly_metrics[m-1].owner_wages for m in range(start_m, min(end_m+1, len(monthly_metrics)+1)))
+            
+            if abs(df_owner_wages - metrics_owner_wages) > 0.01:
+                issues.append(f"Year {year}: DF=${df_owner_wages:.2f} != Metrics=${metrics_owner_wages:.2f}")
+    
+    return len(issues) == 0, issues
+
+def verify_aggregate_wages():
+    """Verify total wages match sum of per-therapist wages"""
+    issues = []
+    for month_idx, metric in enumerate(monthly_metrics):
+        month = month_idx + 1
+        
+        # Sum of per-therapist breakdowns
+        breakdown_total = sum(metric.therapist_wages_breakdown.values())
+        
+        # Aggregate total
+        aggregate_total = metric.total_therapist_wages
+        
+        if abs(breakdown_total - aggregate_total) > 0.01:
+            issues.append(f"Month {month}: Breakdown=${breakdown_total:.2f} != Aggregate=${aggregate_total:.2f}")
+    
+    return len(issues) == 0, issues
+
+def verify_owner_in_breakdown():
+    """Verify owner (id=0) is in therapist breakdown"""
+    issues = []
+    for month_idx, metric in enumerate(monthly_metrics):
+        month = month_idx + 1
+        if 0 not in metric.therapist_wages_breakdown:
+            issues.append(f"Month {month}: Owner (id=0) missing from breakdown")
+        elif metric.therapist_wages_breakdown[0] != metric.owner_wages:
+            issues.append(f"Month {month}: Breakdown owner=${metric.therapist_wages_breakdown[0]:.2f} != owner_wages=${metric.owner_wages:.2f}")
+    
+    return len(issues) == 0, issues
+
+# Run verifications
+owner_salary_ok, owner_salary_issues = verify_owner_salary()
+aggregate_wages_ok, aggregate_issues = verify_aggregate_wages()
+owner_breakdown_ok, owner_breakdown_issues = verify_owner_in_breakdown()
 
 # TEST SUITE
 st.header("🧪 Test Suite")
@@ -878,80 +939,85 @@ for therapist in therapists:
         end_month = min(year_num*12, simulation_months)
         
         if start_month <= simulation_months:
-            months_active = []
+            year_data = df[(df['month']>=start_month) & (df['month']<=end_month)]
+            
+            if len(year_data) == 0:
+                continue
+            
+            # Get therapist's actual wages and sessions from stored monthly data
+            therapist_wages_year = 0.0
+            therapist_sessions_year = 0.0
+            months_active = 0
+            
+            for m in range(start_month, end_month+1):
+                month_idx = m - 1
+                if month_idx < len(monthly_metrics):
+                    month_metric = monthly_metrics[month_idx]
+                    if therapist.id in month_metric.therapist_wages_breakdown:
+                        therapist_wages_year += month_metric.therapist_wages_breakdown[therapist.id]
+                        therapist_sessions_year += month_metric.therapist_sessions_breakdown[therapist.id]
+                        months_active += 1
+            
+            if months_active == 0:
+                continue
+            
+            # Revenue from sessions
+            revenue = therapist_sessions_year * weighted_insurance_rate * (1-no_show_rate) * (1-revenue_loss_pct)
+            
+            # Direct costs (wages already calculated)
+            if therapist.is_owner:
+                direct_pay = therapist_wages_year
+                payroll_tax_amount = therapist_wages_year * payroll_tax_rate
+            else:
+                direct_pay = therapist_wages_year * (1+payroll_tax_rate)
+                payroll_tax_amount = 0
+            
+            gross_margin = revenue - direct_pay - payroll_tax_amount
+            gross_margin_pct = (gross_margin/revenue*100) if revenue>0 else 0
+            
+            # Allocated costs
+            avg_therapists = year_data['active_therapists'].mean()
+            
+            # Marketing allocation based on capacity
+            total_marketing = year_data['marketing_spent'].sum()
+            total_capacity_year = year_data['capacity_clients'].sum()
+            
+            therapist_capacity_year = 0
             for m in range(start_month, end_month+1):
                 if therapist.is_active(m):
-                    months_active.append(m)
+                    therapist_capacity_year += therapist.get_monthly_capacity_sessions(m, WEEKS_PER_MONTH, ramp_speed) / sessions_per_client_month if sessions_per_client_month > 0 else 0
             
-            if len(months_active) > 0:
-                total_sessions = 0
-                for m in months_active:
-                    month_idx = m-1
-                    if month_idx < len(df):
-                        therapist_cohorts = [c for c in cohorts if c.therapist_id==therapist.id]
-                        # Get cohort states at this month
-                        t_clients = 0
-                        for cohort in therapist_cohorts:
-                            if cohort.start_month <= m:
-                                # Approximate clients (would need snapshot)
-                                age = m - cohort.start_month
-                                if age <= len(monthly_metrics):
-                                    t_clients += cohort.current_count
-                        t_sessions = t_clients * sessions_per_client_month
-                        total_sessions += t_sessions
-                
-                billable_sessions = total_sessions * (1-cancellation_rate) * (1-no_show_rate)
-                revenue = billable_sessions * weighted_insurance_rate * (1-revenue_loss_pct)
-                
-                scheduled_for_pay = total_sessions * (1-cancellation_rate)
-                pay_rate = lmsw_pay if therapist.credential=="LMSW" else lcsw_pay
-                
-                if therapist.id == 0:
-                    year_data = df[(df['month']>=start_month) & (df['month']<=end_month)]
-                    direct_pay = year_data['owner_wages'].sum()
-                    payroll_tax_amount = direct_pay * payroll_tax_rate
-                else:
-                    direct_pay = scheduled_for_pay * pay_rate * (1+payroll_tax_rate)
-                    payroll_tax_amount = 0
-                
-                gross_margin = revenue - direct_pay - payroll_tax_amount
-                gross_margin_pct = (gross_margin/revenue*100) if revenue>0 else 0
-                
-                year_data = df[(df['month']>=start_month) & (df['month']<=end_month)]
-                avg_therapists = year_data['active_therapists'].mean()
-                
-                total_marketing = year_data['marketing_spent'].sum()
-                total_capacity = year_data['capacity_clients'].sum()*sessions_per_client_month
-                therapist_capacity = sum([therapist.get_monthly_capacity_sessions(m,WEEKS_PER_MONTH,ramp_speed) for m in months_active])
-                therapist_capacity_pct = therapist_capacity/total_capacity if total_capacity>0 else 0
-                marketing_allocated = total_marketing * therapist_capacity_pct
-                
-                overhead_per_month = (other_overhead_cost+telehealth_cost+other_tech_cost)/avg_therapists if avg_therapists>0 else 0
-                overhead_allocated = overhead_per_month * len(months_active)
-                
-                tech_allocated = get_ehr_cost_per_therapist(len(active_therapists),ehr_system,ehr_custom_cost) * len(months_active)
-                
-                total_allocated = overhead_allocated + marketing_allocated + tech_allocated
-                
-                net_margin = gross_margin - total_allocated
-                net_margin_pct = (net_margin/revenue*100) if revenue>0 else 0
-                
-                therapist_performance[therapist.name][f"Year {year_num}"] = {
-                    'credential': therapist.credential,
-                    'months_active': len(months_active),
-                    'sessions': billable_sessions,
-                    'revenue': revenue,
-                    'direct_pay': direct_pay,
-                    'payroll_tax': payroll_tax_amount,
-                    'gross_margin': gross_margin,
-                    'gross_margin_pct': gross_margin_pct,
-                    'overhead': overhead_allocated,
-                    'marketing': marketing_allocated,
-                    'tech': tech_allocated,
-                    'total_allocated': total_allocated,
-                    'net_margin': net_margin,
-                    'net_margin_pct': net_margin_pct
-                }
+            therapist_capacity_pct = therapist_capacity_year/total_capacity_year if total_capacity_year>0 else 0
+            marketing_allocated = total_marketing * therapist_capacity_pct
+            
+            # Overhead allocation
+            overhead_per_month = (other_overhead_cost+telehealth_cost+other_tech_cost)/avg_therapists if avg_therapists>0 else 0
+            overhead_allocated = overhead_per_month * months_active
+            
+            # Tech allocation
+            tech_allocated = get_ehr_cost_per_therapist(int(avg_therapists), ehr_system, ehr_custom_cost) * months_active
+            
+            total_allocated = overhead_allocated + marketing_allocated + tech_allocated
+            
+            net_margin = gross_margin - total_allocated
+            net_margin_pct = (net_margin/revenue*100) if revenue>0 else 0
+            
+            therapist_performance[therapist.name][f"Year {year_num}"] = {
+                'credential': therapist.credential,
+                'months_active': months_active,
+                'sessions': therapist_sessions_year,
+                'revenue': revenue,
+                'direct_pay': direct_pay,
+                'payroll_tax': payroll_tax_amount,
+                'gross_margin': gross_margin,
+                'gross_margin_pct': gross_margin_pct,
+                'overhead': overhead_allocated,
+                'marketing': marketing_allocated,
+                'tech': tech_allocated,
+                'total_allocated': total_allocated,
+                'net_margin': net_margin,
+                'net_margin_pct': net_margin_pct
+            }
 
 for therapist_name, data in therapist_performance.items():
     if not data:
