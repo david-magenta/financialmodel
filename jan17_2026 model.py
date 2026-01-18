@@ -1030,7 +1030,8 @@ st.markdown("**Detailed profit & loss for each therapist by year**")
 therapist_performance = {}
 
 for therapist in therapists:
-    if therapist.hire_month == 0 and therapist.id != 0:
+    # Skip only if hire_month=0 without start_full (not hired at all)
+    if therapist.hire_month == 0 and therapist.id != 0 and not therapist.start_full:
         continue  # Skip disabled therapist slots
     
     therapist_performance[therapist.name] = {}
@@ -1272,12 +1273,12 @@ ax3.grid(True, alpha=0.3)
 # Chart 4: Cost Breakdown
 ax4.stackplot(df["month"], 
               df["therapist_costs"], 
-              df["owner_total_cost"],
               df["supervision_cost"],
+              df["admin_cost"],
               df["tech_cost"], 
               df["marketing_spent"], 
               df["other_overhead"],
-              labels=['Therapist', 'Owner', 'Supervision', 'Tech', 'Marketing', 'Other'], 
+              labels=['Therapist Pay', 'Supervision', 'Admin', 'Tech', 'Marketing', 'Other'], 
               alpha=0.8)
 ax4.set_title("Cost Breakdown")
 ax4.set_xlabel("Month")
