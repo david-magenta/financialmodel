@@ -696,12 +696,18 @@ for month in range(1, sim_months + 1):
     for t in therapists:
         if t.is_active(month):
             t_clients = therapist_clients[t.id]
-            t_capacity_sessions = t.get_sessions_per_month(month, WEEKS_PER_MONTH, ramp_speed) * attendance_factor
+            # Therapist capacity (scheduled)
+            t_capacity_scheduled = t.get_sessions_per_month(month, WEEKS_PER_MONTH, ramp_speed) * attendance_factor
+            # Therapist capacity (completed, after cancellations)
+            t_capacity_completed = t_capacity_scheduled * (1 - cancel_rate)
+            
+            # Client demand (scheduled)
             t_scheduled_sessions = t_clients * avg_sess_mo * attendance_factor
-            # Apply cancellation rate
+            # Client demand (completed, after cancellations)
             t_completed_sessions = t_scheduled_sessions * (1 - cancel_rate)
-            # Cap at therapist capacity
-            t_actual_sessions = min(t_completed_sessions, t_capacity_sessions)
+            
+            # Cap completed demand at completed capacity
+            t_actual_sessions = min(t_completed_sessions, t_capacity_completed)
             therapist_sessions[t.id] = t_actual_sessions
     
     total_sessions = sum(therapist_sessions.values())
