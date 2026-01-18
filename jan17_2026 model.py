@@ -36,8 +36,17 @@ class Therapist:
     start_full: bool = False  # Start with full caseload (for existing therapists)
     
     def is_active(self, current_month: int) -> bool:
-        """Therapist is active immediately when hired (already credentialed)"""
-        return current_month >= self.hire_month
+        """Therapist is active based on hire month and start_full flag"""
+        if self.id == 0:  # Owner is always active
+            return current_month >= self.hire_month
+        else:
+            # For employees: must have hire_month > 0, or hire_month = 0 with start_full = True
+            if self.hire_month > 0:
+                return current_month >= self.hire_month
+            elif self.hire_month == 0 and self.start_full:
+                return True
+            else:
+                return False  # hire_month = 0 without start_full = not hired
     
     def get_capacity_percentage(self, current_month: int, ramp_speed: str = "Medium") -> float:
         """Ramp up based on speed setting"""
@@ -1083,7 +1092,7 @@ for therapist in therapists:
                 therapist_performance[therapist.name][f"Year {year_num}"] = {
                     'credential': therapist.credential,
                     'months_active': len(months_active),
-                    'sessions': billable_sessions,
+                    'sessions': total_sessions,
                     'revenue': revenue,
                     'direct_pay': direct_pay,
                     'payroll_tax': payroll_tax_amount,
