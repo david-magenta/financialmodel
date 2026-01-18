@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple
 from collections import defaultdict
 
-st.set_page_config(page_title="Therapy Practice Financial Model - Fixed", layout="wide")
-st.title("🧠 Therapy Practice Financial Model - Fixed")
-st.markdown("Simplified and corrected financial modeling")
+st.set_page_config(page_title="Therapy Practice Financial Model V4.4", layout="wide")
+st.title("🧠 Therapy Practice Financial Model V4.4")
+st.markdown("Fixed churn modeling - each client cohort experiences proper churn progression")
 
 # ==========================================
 # CONSTANTS
@@ -33,6 +33,7 @@ class Therapist:
     hire_month: int
     sessions_per_week_target: int  # Actual completed sessions per week
     one_time_hiring_cost: float = 0.0
+    start_full: bool = False  # Start with full caseload (for existing therapists)
     
     def is_active(self, current_month: int) -> bool:
         """Therapist is active immediately when hired (already credentialed)"""
@@ -59,12 +60,21 @@ class Therapist:
             return schedule[months_since_hire]
     
     def get_sessions_per_month(self, current_month: int, weeks_per_month: float, ramp_speed: str = "Medium") -> float:
-        """Calculate actual sessions per month - no utilization rate"""
+        """Calculate actual sessions per month - sessions_per_week_target already represents completed sessions"""
         capacity_pct = self.get_capacity_percentage(current_month, ramp_speed)
         return self.sessions_per_week_target * weeks_per_month * capacity_pct
 
 @dataclass
+class ClientCohort:
+    """Tracks a group of clients that started in the same month"""
+    start_month: int
+    initial_count: float
+    current_count: float
+    therapist_id: int
+
+@dataclass
 class AdminEmployee:
+    """Admin employee - 1099 contractor"""
     id: int
     name: str
     hours_per_week: float
@@ -76,14 +86,6 @@ class AdminEmployee:
     
     def get_monthly_cost(self, weeks_per_month: float) -> float:
         return self.hours_per_week * self.hourly_rate * weeks_per_month
-
-@dataclass
-class ClientCohort:
-    """Tracks a group of clients that started in the same month"""
-    start_month: int
-    initial_count: float
-    current_count: float
-    therapist_id: int
 
 # ==========================================
 # HELPER FUNCTIONS
@@ -104,36 +106,6 @@ def apply_cohort_churn(cohort: ClientCohort, current_month: int,
         churned = cohort.current_count * churn_ongoing
     
     return churned
-
-def calculate_clv(
-    avg_sessions_per_month: float,
-    month1_churn: float,
-    month2_churn: float,
-    month3_churn: float,
-    ongoing_churn: float,
-    contribution_margin_per_session: float
-) -> float:
-    """Calculate Client Lifetime Value using survival curve"""
-    survival_rate = 1.0
-    total_sessions = 0.0
-    max_months = 24  # Cap at 2 years
-    
-    for month in range(1, max_months + 1):
-        if month == 1:
-            survival_rate *= (1 - month1_churn)
-        elif month == 2:
-            survival_rate *= (1 - month2_churn)
-        elif month == 3:
-            survival_rate *= (1 - month3_churn)
-        else:
-            survival_rate *= (1 - ongoing_churn)
-        
-        total_sessions += survival_rate * avg_sessions_per_month
-        
-        if survival_rate < 0.01:  # Stop when less than 1% remain
-            break
-    
-    return total_sessions * contribution_margin_per_session
 
 def calculate_runway(cash_balance: float, avg_cash_flow: float) -> Tuple[float, str, str]:
     """Calculate cash runway and status"""
@@ -207,6 +179,32 @@ def calculate_supervision_costs(
     
     return supervision_cost, owner_supervised, external_supervised
 
+def calculate_breakeven_sessions(
+    credential: str,
+    lmsw_pay: float,
+    lcsw_pay: float,
+    weighted_rate: float,
+    revenue_loss_pct: float,
+    monthly_fixed: float,
+    payroll_tax: float,
+    weeks_per_month: float
+) -> Dict[str, float]:
+    """Calculate break-even sessions accounting for revenue loss"""
+    pay = lmsw_pay if credential == "LMSW" else lcsw_pay
+    effective_revenue = weighted_rate * (1 - revenue_loss_pct)
+    variable_cost = pay * (1 + payroll_tax)
+    contribution = effective_revenue - variable_cost
+    
+    if contribution <= 0:
+        return {'monthly': float('inf'), 'weekly': float('inf'), 'contribution': contribution}
+    
+    breakeven_monthly = monthly_fixed / contribution
+    return {
+        'monthly': breakeven_monthly,
+        'weekly': breakeven_monthly / weeks_per_month,
+        'contribution': contribution
+    }
+
 def calculate_collections(
     revenue_history: Dict[str, List[Dict]],
     month: int,
@@ -271,6 +269,58 @@ def get_seasonality_factor(month: int, apply_seasonality: bool) -> Tuple[float, 
     
     return seasonality.get(month_in_year, (1.0, 1.0))
 
+def project_new_hire(
+    credential: str,
+    sessions_week: int,
+    lmsw_pay: float,
+    lcsw_pay: float,
+    weighted_rate: float,
+    revenue_loss_pct: float,
+    payroll_tax: float,
+    overhead_monthly: float,
+    supervision_cost_monthly: float,
+    hiring_cost: float,
+    weeks_per_month: float,
+    ramp_speed: str = "Medium",
+    months: int = 12
+) -> pd.DataFrame:
+    """Project financial impact of hiring new therapist"""
+    data = []
+    pay_rate = lmsw_pay if credential == "LMSW" else lcsw_pay
+    
+    cumulative_profit = -hiring_cost  # Start with hiring cost
+    
+    # Create temporary therapist for capacity calculation
+    temp_therapist = Therapist(999, "New Hire", credential, 1, sessions_week, hiring_cost, False)
+    
+    for m in range(1, months + 1):
+        # Get capacity percentage
+        capacity_pct = temp_therapist.get_capacity_percentage(m, ramp_speed)
+        
+        # Calculate sessions and revenue (sessions_week already represents completed sessions)
+        sessions = sessions_week * weeks_per_month * capacity_pct
+        revenue = sessions * weighted_rate * (1 - revenue_loss_pct)
+        
+        # Calculate costs
+        pay_cost = sessions * pay_rate * (1 + payroll_tax)
+        total_cost = pay_cost + overhead_monthly + supervision_cost_monthly
+        
+        # Profit
+        monthly_profit = revenue - total_cost
+        cumulative_profit += monthly_profit
+        
+        data.append({
+            'month': m,
+            'capacity_%': capacity_pct * 100,
+            'sessions': sessions,
+            'revenue': revenue,
+            'costs': total_cost,
+            'monthly_profit': monthly_profit,
+            'cumulative_profit': cumulative_profit
+        })
+    
+    return pd.DataFrame(data)
+
 # ==========================================
 # SIDEBAR INPUTS
 # ==========================================
@@ -305,7 +355,7 @@ ramp_speed = st.sidebar.selectbox("Ramp-Up Speed", ["Slow", "Medium", "Fast"], i
 st.sidebar.markdown(f"**Selected: {ramp_speed} ramp-up**")
 
 therapists = []
-therapists.append(Therapist(0, "Owner", "LCSW", 0, owner_sessions_per_week, 0))
+therapists.append(Therapist(0, "Owner", "LCSW", 0, owner_sessions_per_week, 0, False))
 
 default_hires = [
     (1, "Therapist 1", "LMSW", 3, 20, 3000.0),
@@ -327,11 +377,23 @@ for i in range(1, 13):
         col1, col2 = st.columns(2)
         hire_m = col1.number_input(f"Hire Month", 0, 36, def_month, key=f"hire_{i}")
         
-        if hire_m > 0:
+        if hire_m == 0:
+            # Existing therapist - show full caseload option
+            start_full = st.checkbox("Start with Full Caseload", value=False, key=f"full_{i}")
             cred = col2.selectbox(f"Credential", ["LMSW", "LCSW"], index=0 if def_cred=="LMSW" else 1, key=f"cred_{i}")
             sess = st.slider(f"Sessions/Week (Actual)", 10, 30, 20, key=f"sess_{i}")
             cost = st.number_input(f"Hiring Cost", 0.0, value=def_cost, step=500.0, key=f"cost_{i}")
-            therapists.append(Therapist(i, f"Therapist {i}", cred, hire_m, sess, cost))
+            therapists.append(Therapist(i, f"Therapist {i}", cred, hire_m, sess, cost, start_full))
+        elif hire_m > 0:
+            cred = col2.selectbox(f"Credential", ["LMSW", "LCSW"], index=0 if def_cred=="LMSW" else 1, key=f"cred_{i}")
+            sess = st.slider(f"Sessions/Week (Actual)", 10, 30, 20, key=f"sess_{i}")
+            cost = st.number_input(f"Hiring Cost", 0.0, value=def_cost, step=500.0, key=f"cost_{i}")
+            therapists.append(Therapist(i, f"Therapist {i}", cred, hire_m, sess, cost, False))
+
+st.sidebar.header("💰 Compensation")
+lmsw_pay = st.sidebar.number_input("LMSW Pay/Session", 30.0, value=40.0, step=5.0)
+lcsw_pay = st.sidebar.number_input("LCSW Pay/Session", 35.0, value=50.0, step=5.0)
+payroll_tax = st.sidebar.slider("Payroll Tax %", 0.0, 20.0, 15.3, 0.1) / 100
 
 st.sidebar.header("👥 Admin Employees")
 st.sidebar.markdown("1099 contractors (no payroll tax)")
@@ -351,11 +413,6 @@ with st.sidebar.expander("Admin 2"):
         admin2_hours = st.number_input("Hours/Week", 0, 40, 15, key="admin2_hours")
         admin2_rate = st.number_input("Hourly Rate ($)", 0.0, 100.0, 30.0, step=5.0, key="admin2_rate")
         admin_employees.append(AdminEmployee(2, "Admin 2", admin2_hours, admin2_rate, admin2_start))
-
-st.sidebar.header("💰 Compensation")
-lmsw_pay = st.sidebar.number_input("LMSW Pay/Session", 30.0, value=40.0, step=5.0)
-lcsw_pay = st.sidebar.number_input("LCSW Pay/Session", 35.0, value=50.0, step=5.0)
-payroll_tax = st.sidebar.slider("Payroll Tax %", 0.0, 20.0, 15.3, 0.1) / 100
 
 st.sidebar.header("📊 Payer Mix")
 use_simple = st.sidebar.checkbox("Simple Model", value=True)
@@ -483,7 +540,7 @@ marketing_pipeline = []  # Track leads in pipeline
 # FIXED: Track client cohorts instead of just total numbers
 therapist_cohorts = defaultdict(list)  # therapist_id -> list of ClientCohort objects
 
-# FIXED: Initialize owner's starting cohort with start_month=1 (not 0)
+# Initialize owner's starting cohort
 if owner_initial_clients > 0:
     therapist_cohorts[0].append(ClientCohort(
         start_month=1,  # FIX #1: Start at month 1, not 0
@@ -491,6 +548,18 @@ if owner_initial_clients > 0:
         current_count=owner_initial_clients,
         therapist_id=0
     ))
+
+# FIX #21: Initialize existing employee therapists with full caseloads if requested
+for therapist in therapists:
+    if therapist.id != 0 and therapist.hire_month == 0 and therapist.start_full:
+        initial_capacity = therapist.sessions_per_week_target * WEEKS_PER_MONTH
+        initial_clients = initial_capacity / avg_sess_mo if avg_sess_mo > 0 else 0
+        therapist_cohorts[therapist.id].append(ClientCohort(
+            start_month=1,
+            initial_count=initial_clients,
+            current_count=initial_clients,
+            therapist_id=therapist.id
+        ))
 
 for month in range(1, sim_months + 1):
     month_data = {"month": month}
@@ -526,7 +595,7 @@ for month in range(1, sim_months + 1):
     month_data["total_capacity_sessions"] = total_cap_sess
     month_data["total_capacity_clients"] = total_cap_clients
     
-    # Apply churn to each cohort based on its age
+    # FIXED: Apply churn to each cohort based on its age
     total_churned = 0
     for t_id, cohorts in therapist_cohorts.items():
         for cohort in cohorts:
@@ -763,6 +832,7 @@ c3.metric("Utilization", f"{final['capacity_utilization']:.1f}%")
 c4.metric("Monthly Profit", f"${final['profit_accrual']:,.0f}")
 c5.metric("Cash Balance", f"${final['cash_balance']:,.0f}")
 
+# Add churn impact display
 st.info(f"📊 **Churn Model Active**: Each client cohort experiences {churn1*100:.0f}% churn in month 1, "
         f"{churn2*100:.0f}% in month 2, {churn3*100:.0f}% in month 3, then {churn_ongoing*100:.0f}% ongoing. "
         f"Total cohorts tracked: {final['total_cohorts']}")
@@ -887,6 +957,263 @@ elif util_pct > 70:
 else:
     st.warning("⚠️ Fix marketing first - low utilization")
 
+st.markdown("### If You Hire an LMSW Next Month:")
+
+# Calculate supervision cost for new LMSW
+hours_per_month = SUPERVISION_HOURS_PER_LMSW_WEEK * WEEKS_PER_MONTH
+if lmsw_count < OWNER_SUPERVISION_CAPACITY:
+    supervision_cost_new = 0  # Owner supervision has no cost
+else:
+    supervision_cost_new = hours_per_month * (EXTERNAL_SUPERVISION_HOURLY / LMSW_SHARE_SUPERVISION)
+
+proj = project_new_hire(
+    "LMSW", 20, lmsw_pay, lcsw_pay, weighted_rate,
+    revenue_loss_pct, payroll_tax,
+    500, supervision_cost_new, 3000, WEEKS_PER_MONTH, ramp_speed, 12
+)
+
+breakeven_month = proj[proj['cumulative_profit'] >= 0]['month'].min() if any(proj['cumulative_profit'] >= 0) else None
+
+col1, col2 = st.columns(2)
+with col1:
+    st.markdown(f"""
+    - One-Time Hiring Cost: $3,000
+    - Ramp Period: {5 if ramp_speed == 'Medium' else 6 if ramp_speed == 'Slow' else 4} months
+    - Monthly Contribution (full): ${proj.iloc[-1]['monthly_profit']:,.0f}
+    - Break-Even Month: {f"Month {breakeven_month}" if breakeven_month else "Not within 12 months"}
+    """)
+
+with col2:
+    cash_needed = 3000 + abs(proj[proj['cumulative_profit'] < 0]['cumulative_profit'].min()) if any(proj['cumulative_profit'] < 0) else 3000
+    st.markdown(f"""
+    - Cash Required: ${cash_needed:,.0f}
+    - Current Cash: ${final['cash_balance']:,.0f}
+    - **Decision**: {"✅ Can afford" if final['cash_balance'] >= cash_needed else f"⚠️ Need ${cash_needed - final['cash_balance']:,.0f} more"}
+    """)
+
+st.dataframe(proj.style.format({
+    'capacity_%': '{:.0f}%',
+    'sessions': '{:.1f}',
+    'revenue': '${:,.0f}',
+    'costs': '${:,.0f}',
+    'monthly_profit': '${:,.0f}',
+    'cumulative_profit': '${:,.0f}'
+}), use_container_width=True)
+
+st.markdown("---")
+
+# PER-THERAPIST PERFORMANCE CARDS
+st.header("👥 Individual Therapist Performance")
+
+st.markdown("**Detailed profit & loss for each therapist by year**")
+
+# Build therapist performance data using actual client counts
+therapist_performance = {}
+
+for therapist in therapists:
+    if therapist.hire_month == 0 and therapist.id != 0:
+        continue  # Skip disabled therapist slots
+    
+    therapist_performance[therapist.name] = {}
+    
+    for year_num in range(1, (sim_months // 12) + 2):
+        start_month = (year_num - 1) * 12 + 1
+        end_month = min(year_num * 12, sim_months)
+        
+        if start_month <= sim_months:
+            months_active = []
+            for m in range(start_month, end_month + 1):
+                if therapist.is_active(m):
+                    months_active.append(m)
+            
+            if len(months_active) > 0:
+                # Get actual sessions from therapist's client panel
+                total_sessions = 0
+                for m in months_active:
+                    month_idx = m - 1
+                    if month_idx < len(df):
+                        t_clients = df.iloc[month_idx]['therapist_clients'].get(therapist.id, 0)
+                        t_sessions = t_clients * avg_sess_mo
+                        total_sessions += t_sessions
+                
+                revenue = total_sessions * weighted_rate * (1 - revenue_loss_pct)
+                
+                # Direct costs - Owner has $0 cost
+                if therapist.id == 0:
+                    direct_pay = 0
+                    payroll_tax_amount = 0
+                else:
+                    pay_rate = lmsw_pay if therapist.credential == "LMSW" else lcsw_pay
+                    direct_pay = total_sessions * pay_rate * (1 + payroll_tax)
+                    payroll_tax_amount = 0  # Included in direct_pay
+                
+                gross_margin = revenue - direct_pay - payroll_tax_amount
+                gross_margin_pct = (gross_margin / revenue * 100) if revenue > 0 else 0
+                
+                # Allocated costs
+                year_data = df[(df['month'] >= start_month) & (df['month'] <= end_month)]
+                avg_therapists = year_data['active_therapists'].mean()
+                
+                # Allocate marketing based on capacity
+                total_marketing = year_data['marketing_spent'].sum()
+                total_capacity = year_data['total_capacity_sessions'].sum()
+                therapist_capacity = sum([therapist.get_sessions_per_month(m, WEEKS_PER_MONTH, ramp_speed) for m in months_active])
+                therapist_capacity_pct = therapist_capacity / total_capacity if total_capacity > 0 else 0
+                marketing_allocated = total_marketing * therapist_capacity_pct
+                
+                # Other allocations
+                overhead_per_month = (other_overhead + telehealth + other_tech) / avg_therapists if avg_therapists > 0 else 0
+                overhead_allocated = overhead_per_month * len(months_active)
+                
+                # Allocate actual supervision costs from year data
+                total_supervision = year_data['supervision_cost'].sum()
+                total_lmsw_months = year_data['active_lmsw'].sum()
+                if therapist.credential == "LMSW" and total_lmsw_months > 0:
+                    supervision_allocated = (len(months_active) / total_lmsw_months) * total_supervision
+                else:
+                    supervision_allocated = 0
+                
+                tech_allocated = cost_per_ther_ehr * len(months_active)
+                
+                total_allocated = overhead_allocated + supervision_allocated + marketing_allocated + tech_allocated
+                
+                net_margin = gross_margin - total_allocated
+                net_margin_pct = (net_margin / revenue * 100) if revenue > 0 else 0
+                
+                therapist_performance[therapist.name][f"Year {year_num}"] = {
+                    'credential': therapist.credential,
+                    'months_active': len(months_active),
+                    'sessions': billable_sessions,
+                    'revenue': revenue,
+                    'direct_pay': direct_pay,
+                    'payroll_tax': payroll_tax_amount,
+                    'gross_margin': gross_margin,
+                    'gross_margin_pct': gross_margin_pct,
+                    'overhead': overhead_allocated,
+                    'supervision': supervision_allocated,
+                    'marketing': marketing_allocated,
+                    'tech': tech_allocated,
+                    'total_allocated': total_allocated,
+                    'net_margin': net_margin,
+                    'net_margin_pct': net_margin_pct
+                }
+
+# Display therapist cards
+for therapist_name, data in therapist_performance.items():
+    if not data:
+        continue
+    
+    st.markdown(f"### {therapist_name}")
+    
+    # Year columns
+    year_cols = st.columns(len(data))
+    
+    for idx, (year_label, year_info) in enumerate(data.items()):
+        with year_cols[idx]:
+            st.markdown(f"**{year_label}** ({year_info['credential']}, {year_info['months_active']}mo)")
+            
+            st.metric("Revenue", f"${year_info['revenue']:,.0f}")
+            st.metric("Gross Margin", f"${year_info['gross_margin']:,.0f}", 
+                     delta=f"{year_info['gross_margin_pct']:.1f}%")
+            
+            with st.expander("Cost Detail"):
+                st.markdown(f"""
+                **Direct Costs:**
+                - {'Salary' if therapist_name == 'Owner' else 'Pay'}: ${year_info['direct_pay']:,.0f}
+                {f"- Payroll Tax: ${year_info['payroll_tax']:,.0f}" if year_info['payroll_tax'] > 0 else ""}
+                
+                **Allocated Costs:**
+                - Overhead: ${year_info['overhead']:,.0f}
+                - Supervision: ${year_info['supervision']:,.0f}
+                - Marketing: ${year_info['marketing']:,.0f}
+                - Technology: ${year_info['tech']:,.0f}
+                - **Total**: ${year_info['total_allocated']:,.0f}
+                """)
+            
+            # Net margin with color coding
+            if year_info['net_margin'] > 0:
+                st.success(f"**Net Margin:** ${year_info['net_margin']:,.0f} ({year_info['net_margin_pct']:.1f}%)")
+            else:
+                st.error(f"**Net Margin:** ${year_info['net_margin']:,.0f} ({year_info['net_margin_pct']:.1f}%)")
+            
+            st.markdown(f"_Sessions: {year_info['sessions']:.0f}_")
+    
+    st.markdown("---")
+
+# BREAK-EVEN ANALYSIS
+st.header("⚖️ Break-Even Sessions Per Therapist")
+
+lmsw_fixed = 500
+lcsw_fixed = 500
+
+lmsw_be = calculate_breakeven_sessions("LMSW", lmsw_pay, lcsw_pay, weighted_rate, 
+                                      revenue_loss_pct, lmsw_fixed, payroll_tax, WEEKS_PER_MONTH)
+lcsw_be = calculate_breakeven_sessions("LCSW", lmsw_pay, lcsw_pay, weighted_rate,
+                                      revenue_loss_pct, lcsw_fixed, payroll_tax, WEEKS_PER_MONTH)
+
+col1, col2 = st.columns(2)
+with col1:
+    st.markdown("### LMSW")
+    if lmsw_be['monthly'] < float('inf'):
+        st.metric("Monthly", f"{lmsw_be['monthly']:.1f}")
+        st.metric("Weekly", f"{lmsw_be['weekly']:.1f}")
+    else:
+        st.metric("Monthly", "Never breaks even")
+        st.metric("Weekly", "Never breaks even")
+    st.markdown(f"Contribution: ${lmsw_be['contribution']:.2f}/session")
+
+with col2:
+    st.markdown("### LCSW")
+    if lcsw_be['monthly'] < float('inf'):
+        st.metric("Monthly", f"{lcsw_be['monthly']:.1f}")
+        st.metric("Weekly", f"{lcsw_be['weekly']:.1f}")
+    else:
+        st.metric("Monthly", "Never breaks even")
+        st.metric("Weekly", "Never breaks even")
+    st.markdown(f"Contribution: ${lcsw_be['contribution']:.2f}/session")
+
+st.markdown("---")
+
+# SCENARIO ANALYSIS
+st.header("📊 Scenario Analysis")
+
+st.markdown("**Comparing outcomes under different assumptions:**")
+
+scenarios = {
+    'Pessimistic': {'util_adj': -0.15, 'churn_adj': 0.10},
+    'Base Case': {'util_adj': 0.0, 'churn_adj': 0.0},
+    'Optimistic': {'util_adj': 0.10, 'churn_adj': -0.05}
+}
+
+scenario_results = []
+for name, params in scenarios.items():
+    if name == 'Base Case':
+        total_comp = sum(yc['total'] for yc in years_comp if 'Year 1' in yc['year'])
+        scenario_results.append({
+            'Scenario': name,
+            'Year 1 Comp': total_comp,
+            'Cash Low': df['cash_balance'].min(),
+            'Final Cash': final['cash_balance']
+        })
+    else:
+        # Simplified estimation
+        util_factor = 1 + params['util_adj']
+        churn_factor = 1 + params['churn_adj']
+        total_comp_est = sum(yc['total'] for yc in years_comp if 'Year 1' in yc['year']) * util_factor
+        cash_est = final['cash_balance'] * util_factor
+        scenario_results.append({
+            'Scenario': name,
+            'Year 1 Comp': total_comp_est,
+            'Cash Low': df['cash_balance'].min() * util_factor,
+            'Final Cash': cash_est
+        })
+
+st.dataframe(pd.DataFrame(scenario_results).style.format({
+    'Year 1 Comp': '${:,.0f}',
+    'Cash Low': '${:,.0f}',
+    'Final Cash': '${:,.0f}'
+}), use_container_width=True)
+
 st.markdown("---")
 
 # CHARTS
@@ -925,12 +1252,12 @@ ax3.grid(True, alpha=0.3)
 # Chart 4: Cost Breakdown
 ax4.stackplot(df["month"], 
               df["therapist_costs"], 
+              df["owner_total_cost"],
               df["supervision_cost"],
-              df["admin_cost"],
               df["tech_cost"], 
               df["marketing_spent"], 
               df["other_overhead"],
-              labels=['Therapist', 'Supervision', 'Admin', 'Tech', 'Marketing', 'Other'], 
+              labels=['Therapist', 'Owner', 'Supervision', 'Tech', 'Marketing', 'Other'], 
               alpha=0.8)
 ax4.set_title("Cost Breakdown")
 ax4.set_xlabel("Month")
@@ -994,6 +1321,6 @@ with st.expander("🔍 Client Cohort Details (Debug)"):
 st.markdown("---")
 st.header("📥 Export")
 csv = df.to_csv(index=False)
-st.download_button("Download CSV", csv, f"practice_model_fixed_{sim_months}mo.csv", "text/csv")
+st.download_button("Download CSV", csv, f"practice_model_v44_{sim_months}mo.csv", "text/csv")
 
-st.success("✅ Model Fixed - All 12 fixes implemented!")
+st.success("✅ Model V4.4 Complete - Churn model fixed!")
