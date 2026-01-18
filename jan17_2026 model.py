@@ -49,9 +49,13 @@ class Therapist:
                 return False  # hire_month = 0 without start_full = not hired
     
     def get_capacity_percentage(self, current_month: int, ramp_speed: str = "Medium") -> float:
-        """Ramp up based on speed setting"""
+        """Ramp up based on speed setting. Existing employees (start_full=True) start at 100%"""
         if not self.is_active(current_month):
             return 0.0
+        
+        # Existing employees with full caseload start at 100% capacity
+        if self.start_full:
+            return 1.0
         
         months_since_hire = current_month - self.hire_month
         
@@ -367,7 +371,7 @@ ramp_speed = st.sidebar.selectbox("Ramp-Up Speed", ["Slow", "Medium", "Fast"], i
 st.sidebar.markdown(f"**Selected: {ramp_speed} ramp-up**")
 
 therapists = []
-therapists.append(Therapist(0, "Owner", "LCSW", 0, owner_sessions_per_week, 0, False))
+therapists.append(Therapist(0, "Owner", "LCSW", 0, owner_sessions_per_week, 0, True))  # Owner starts at full capacity
 
 default_hires = [
     (1, "Therapist 1", "LMSW", 3, 20, 3000.0),
