@@ -193,14 +193,15 @@ def calculate_breakeven_sessions(
     lmsw_pay: float,
     lcsw_pay: float,
     weighted_rate: float,
+    cancel_rate: float,
     revenue_loss_pct: float,
     monthly_fixed: float,
     payroll_tax: float,
     weeks_per_month: float
 ) -> Dict[str, float]:
-    """Calculate break-even sessions accounting for revenue loss"""
+    """Calculate break-even sessions accounting for cancellations and revenue loss"""
     pay = lmsw_pay if credential == "LMSW" else lcsw_pay
-    effective_revenue = weighted_rate * (1 - revenue_loss_pct)
+    effective_revenue = weighted_rate * (1 - cancel_rate) * (1 - revenue_loss_pct)
     variable_cost = pay * (1 + payroll_tax)
     contribution = effective_revenue - variable_cost
     
@@ -284,6 +285,7 @@ def project_new_hire(
     lmsw_pay: float,
     lcsw_pay: float,
     weighted_rate: float,
+    cancel_rate: float,
     revenue_loss_pct: float,
     payroll_tax: float,
     overhead_monthly: float,
@@ -306,12 +308,13 @@ def project_new_hire(
         # Get capacity percentage
         capacity_pct = temp_therapist.get_capacity_percentage(m, ramp_speed)
         
-        # Calculate sessions and revenue (sessions_week already represents completed sessions)
-        sessions = sessions_week * weeks_per_month * capacity_pct
-        revenue = sessions * weighted_rate * (1 - revenue_loss_pct)
+        # Calculate sessions and revenue (sessions_week = scheduled sessions target)
+        scheduled_sessions = sessions_week * weeks_per_month * capacity_pct
+        completed_sessions = scheduled_sessions * (1 - cancel_rate)
+        revenue = completed_sessions * weighted_rate * (1 - revenue_loss_pct)
         
-        # Calculate costs
-        pay_cost = sessions * pay_rate * (1 + payroll_tax)
+        # Calculate costs (paid for completed sessions)
+        pay_cost = completed_sessions * pay_rate * (1 + payroll_tax)
         total_cost = pay_cost + overhead_monthly + supervision_cost_monthly
         
         # Profit
@@ -321,7 +324,7 @@ def project_new_hire(
         data.append({
             'month': m,
             'capacity_%': capacity_pct * 100,
-            'sessions': sessions,
+            'sessions': completed_sessions,
             'revenue': revenue,
             'costs': total_cost,
             'monthly_profit': monthly_profit,
@@ -513,7 +516,10 @@ churn_ongoing = st.sidebar.slider("Ongoing Churn %", 0, 20, 5,
     help="% monthly churn after month 3") / 100
 
 st.sidebar.header("🧑‍🎓 Client Behavior")
-avg_sess_mo = st.sidebar.number_input("Sessions/Client/Month", value=3.2, step=0.1)
+avg_sess_mo = st.sidebar.number_input("Sessions/Client/Month (Scheduled)", value=4.0, step=0.1,
+    help="How often clients schedule sessions (before cancellations)")
+cancel_rate = st.sidebar.slider("Cancellation %", 0, 40, 20,
+    help="% of scheduled sessions that get cancelled") / 100
 copay_pct = st.sidebar.slider("% with Copay", 0, 100, 20) / 100
 avg_copay = st.sidebar.number_input("Avg Copay", value=25.0)
 cc_fee = st.sidebar.slider("CC Fee %", 0.0, 5.0, 2.9, 0.1) / 100
@@ -526,6 +532,7 @@ st.sidebar.header("⚙️ Simulation")
 sim_months = st.sidebar.number_input("Months", 12, 60, value=24)
 
 # Input validation
+assert 0 <= cancel_rate <= 1, "Cancellation rate must be 0-100%"
 assert cac_target > 0, "CAC must be positive"
 assert avg_sess_mo > 0, "Sessions/client must be positive"
 
@@ -667,7 +674,6 @@ for month in range(1, sim_months + 1):
     
     # Track actual marketing spent (only what's needed)
     actual_mkt_spent = new_to_pipeline * cac_target
-    marketing_savings = mkt_budget - actual_mkt_spent  # This becomes profit
     
     marketing_pipeline.append(new_to_pipeline)
     
@@ -679,7 +685,6 @@ for month in range(1, sim_months + 1):
     month_data["capacity_utilization"] = (active_clients / total_cap_clients * 100) if total_cap_clients > 0 else 0
     month_data["marketing_budget"] = mkt_budget
     month_data["marketing_spent"] = actual_mkt_spent
-    month_data["marketing_saved"] = marketing_savings
     
     # Sessions and revenue - based on each therapist's actual clients
     # FIX #4: Cap sessions at therapist capacity
@@ -688,18 +693,20 @@ for month in range(1, sim_months + 1):
         if t.is_active(month):
             t_clients = therapist_clients[t.id]
             t_capacity_sessions = t.get_sessions_per_month(month, WEEKS_PER_MONTH, ramp_speed) * attendance_factor
-            t_desired_sessions = t_clients * avg_sess_mo * attendance_factor
+            t_scheduled_sessions = t_clients * avg_sess_mo * attendance_factor
+            # Apply cancellation rate
+            t_completed_sessions = t_scheduled_sessions * (1 - cancel_rate)
             # Cap at therapist capacity
-            t_actual_sessions = min(t_desired_sessions, t_capacity_sessions)
+            t_actual_sessions = min(t_completed_sessions, t_capacity_sessions)
             therapist_sessions[t.id] = t_actual_sessions
     
     total_sessions = sum(therapist_sessions.values())
     
-    month_data["scheduled_sessions"] = total_sessions
-    month_data["billable_sessions"] = total_sessions  # No cancel/no-show reductions
+    month_data["scheduled_sessions"] = total_sessions / (1 - cancel_rate) if cancel_rate < 1 else 0
+    month_data["billable_sessions"] = total_sessions  # After cancellations
     
     # FIX #2: Revenue with copay correction
-    # Insurance pays (rate - copay), patient pays copay separately
+    # Total revenue per session = insurance rate (copay only affects cash flow timing)
     rev_by_payer = {}
     copay_rev_total = 0
     
@@ -707,12 +714,15 @@ for month in range(1, sim_months + 1):
         p_sess = total_sessions * pinfo["pct"]
         
         if pname != "Self-Pay":
-            # Insurance: rate minus copay
-            insurance_portion = p_sess * (pinfo["rate"] - avg_copay)
-            copay_portion = p_sess * avg_copay * copay_pct  # Only copay_pct of patients have copays
+            # Insurance revenue = rate - (copay * copay_pct)
+            # This ensures total per session = rate regardless of copay_pct
+            insurance_revenue_gross = p_sess * (pinfo["rate"] - avg_copay * copay_pct)
+            
+            # Copay revenue (collected from patients)
+            copay_portion = p_sess * avg_copay * copay_pct
             
             # Apply revenue loss to insurance portion only
-            insurance_revenue = insurance_portion * (1 - revenue_loss_pct)
+            insurance_revenue = insurance_revenue_gross * (1 - revenue_loss_pct)
             
             rev_by_payer[pname] = insurance_revenue
             copay_rev_total += copay_portion
@@ -800,9 +810,9 @@ for month in range(1, sim_months + 1):
     month_data["other_overhead"] = other_overhead
     month_data["total_costs"] = total_costs
     
-    # Profit (includes marketing savings)
-    profit_acc = total_rev - total_costs + marketing_savings
-    cash_flow = collections - total_costs + marketing_savings
+    # Profit
+    profit_acc = total_rev - total_costs
+    cash_flow = collections - total_costs
     
     month_data["profit_accrual"] = profit_acc
     month_data["cash_flow"] = cash_flow
@@ -977,7 +987,7 @@ else:
 
 proj = project_new_hire(
     "LMSW", 20, lmsw_pay, lcsw_pay, weighted_rate,
-    revenue_loss_pct, payroll_tax,
+    cancel_rate, revenue_loss_pct, payroll_tax,
     500, supervision_cost_new, 3000, WEEKS_PER_MONTH, ramp_speed, 12
 )
 
@@ -1042,8 +1052,9 @@ for therapist in therapists:
                     month_idx = m - 1
                     if month_idx < len(df):
                         t_clients = df.iloc[month_idx]['therapist_clients'].get(therapist.id, 0)
-                        t_sessions = t_clients * avg_sess_mo
-                        total_sessions += t_sessions
+                        t_scheduled = t_clients * avg_sess_mo
+                        t_completed = t_scheduled * (1 - cancel_rate)
+                        total_sessions += t_completed
                 
                 revenue = total_sessions * weighted_rate * (1 - revenue_loss_pct)
                 
@@ -1156,9 +1167,9 @@ lmsw_fixed = 500
 lcsw_fixed = 500
 
 lmsw_be = calculate_breakeven_sessions("LMSW", lmsw_pay, lcsw_pay, weighted_rate, 
-                                      revenue_loss_pct, lmsw_fixed, payroll_tax, WEEKS_PER_MONTH)
+                                      cancel_rate, revenue_loss_pct, lmsw_fixed, payroll_tax, WEEKS_PER_MONTH)
 lcsw_be = calculate_breakeven_sessions("LCSW", lmsw_pay, lcsw_pay, weighted_rate,
-                                      revenue_loss_pct, lcsw_fixed, payroll_tax, WEEKS_PER_MONTH)
+                                      cancel_rate, revenue_loss_pct, lcsw_fixed, payroll_tax, WEEKS_PER_MONTH)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -1282,11 +1293,11 @@ st.markdown("---")
 with st.expander("📋 Detailed Monthly Data"):
     display_df = df[["month", "active_clients", "total_capacity_clients", "churned_clients", "new_clients", 
                      "active_therapists", "revenue_earned", "collections", "total_costs", "profit_accrual", 
-                     "cash_flow", "cash_balance", "marketing_budget", "marketing_spent", "marketing_saved"]]
+                     "cash_flow", "cash_balance", "marketing_budget", "marketing_spent"]]
     st.dataframe(display_df.style.format({
         "revenue_earned": "${:,.0f}", "collections": "${:,.0f}", "total_costs": "${:,.0f}",
         "profit_accrual": "${:,.0f}", "cash_flow": "${:,.0f}", "cash_balance": "${:,.0f}",
-        "marketing_budget": "${:,.0f}", "marketing_spent": "${:,.0f}", "marketing_saved": "${:,.0f}",
+        "marketing_budget": "${:,.0f}", "marketing_spent": "${:,.0f}",
         "active_clients": "{:.1f}", "total_capacity_clients": "{:.1f}", 
         "churned_clients": "{:.1f}", "new_clients": "{:.1f}"
     }), use_container_width=True)
