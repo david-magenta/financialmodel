@@ -106,16 +106,25 @@ class AdminEmployee:
 
 def apply_cohort_churn(cohort: ClientCohort, current_month: int, 
                        churn1: float, churn2: float, churn3: float, churn_ongoing: float) -> float:
-    """Apply appropriate churn rate based on cohort age"""
-    cohort_age = current_month - cohort.start_month + 1
+    """Apply appropriate churn rate based on cohort age
     
-    if cohort_age == 1:
+    Initial cohorts (start_month=0) are existing clients who should use steady-state churn.
+    New cohorts follow the Month 1/2/3 progression.
+    """
+    # Special case: Initial/existing clients (start_month=0) use steady-state churn
+    if cohort.start_month == 0:
+        return cohort.current_count * churn_ongoing
+    
+    # Regular cohorts: calculate age and apply progressive churn
+    cohort_age = current_month - cohort.start_month
+    
+    if cohort_age == 0:  # First month with therapist
         churned = cohort.current_count * churn1
-    elif cohort_age == 2:
+    elif cohort_age == 1:  # Second month
         churned = cohort.current_count * churn2
-    elif cohort_age == 3:
+    elif cohort_age == 2:  # Third month
         churned = cohort.current_count * churn3
-    else:
+    else:  # Ongoing
         churned = cohort.current_count * churn_ongoing
     
     return churned
@@ -563,7 +572,7 @@ therapist_cohorts = defaultdict(list)  # therapist_id -> list of ClientCohort ob
 # Initialize owner's starting cohort
 if owner_initial_clients > 0:
     therapist_cohorts[0].append(ClientCohort(
-        start_month=1,  # FIX #1: Start at month 1, not 0
+        start_month=0,  # FIX: Start at month 0 (existing clients before simulation starts)
         initial_count=owner_initial_clients,
         current_count=owner_initial_clients,
         therapist_id=0
@@ -575,7 +584,7 @@ for therapist in therapists:
         initial_capacity = therapist.sessions_per_week_target * WEEKS_PER_MONTH
         initial_clients = initial_capacity / avg_sess_mo if avg_sess_mo > 0 else 0
         therapist_cohorts[therapist.id].append(ClientCohort(
-            start_month=1,
+            start_month=0,  # FIX: Existing employees start at month 0 (no Month 1 churn shock)
             initial_count=initial_clients,
             current_count=initial_clients,
             therapist_id=therapist.id
