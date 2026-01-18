@@ -372,7 +372,8 @@ working_weeks_per_year = st.sidebar.number_input(
 WEEKS_PER_MONTH = working_weeks_per_year / 12
 
 st.sidebar.header("👤 Owner")
-owner_sessions_per_week = st.sidebar.number_input("Your Sessions/Week (Actual Completed)", min_value=0, value=20)
+owner_sessions_per_week = st.sidebar.number_input("Your Sessions/Week (Scheduled)", min_value=0, value=20,
+    help="Calendar slots available per week (before cancellations)")
 
 st.sidebar.header("🧑‍⚕️ Therapist Hiring")
 ramp_speed = st.sidebar.selectbox("Ramp-Up Speed", ["Slow", "Medium", "Fast"], index=1,
@@ -406,12 +407,14 @@ for i in range(1, 13):
             # Existing therapist - show full caseload option
             start_full = st.checkbox("Start with Full Caseload", value=False, key=f"full_{i}")
             cred = col2.selectbox(f"Credential", ["LMSW", "LCSW"], index=0 if def_cred=="LMSW" else 1, key=f"cred_{i}")
-            sess = st.slider(f"Sessions/Week (Actual)", 10, 30, 20, key=f"sess_{i}")
+            sess = st.slider(f"Sessions/Week (Scheduled)", 10, 30, 20, key=f"sess_{i}",
+                help="Calendar slots per week (before cancellations)")
             cost = st.number_input(f"Hiring Cost", 0.0, value=def_cost, step=500.0, key=f"cost_{i}")
             therapists.append(Therapist(i, f"Therapist {i}", cred, hire_m, sess, cost, start_full))
         elif hire_m > 0:
             cred = col2.selectbox(f"Credential", ["LMSW", "LCSW"], index=0 if def_cred=="LMSW" else 1, key=f"cred_{i}")
-            sess = st.slider(f"Sessions/Week (Actual)", 10, 30, 20, key=f"sess_{i}")
+            sess = st.slider(f"Sessions/Week (Scheduled)", 10, 30, 20, key=f"sess_{i}",
+                help="Calendar slots per week (before cancellations)")
             cost = st.number_input(f"Hiring Cost", 0.0, value=def_cost, step=500.0, key=f"cost_{i}")
             therapists.append(Therapist(i, f"Therapist {i}", cred, hire_m, sess, cost, False))
 
@@ -556,6 +559,7 @@ assert avg_sess_mo > 0, "Sessions/client must be positive"
 # Calculate owner's starting caseload (KEEPING OWNER FULL FROM DAY 1)
 owner = therapists[0]
 owner_capacity_sessions_month1 = owner.sessions_per_week_target * WEEKS_PER_MONTH
+# Owner capacity is SCHEDULED - divide by scheduled sessions per client
 owner_initial_clients = owner_capacity_sessions_month1 / avg_sess_mo if avg_sess_mo > 0 else 0
 
 # Initialize tracking variables
@@ -582,6 +586,7 @@ if owner_initial_clients > 0:
 for therapist in therapists:
     if therapist.id != 0 and therapist.hire_month == 0 and therapist.start_full:
         initial_capacity = therapist.sessions_per_week_target * WEEKS_PER_MONTH
+        # Therapist capacity is SCHEDULED - divide by scheduled sessions per client
         initial_clients = initial_capacity / avg_sess_mo if avg_sess_mo > 0 else 0
         therapist_cohorts[therapist.id].append(ClientCohort(
             start_month=0,  # FIX: Existing employees start at month 0 (no Month 1 churn shock)
@@ -600,11 +605,12 @@ for month in range(1, sim_months + 1):
     # Calculate active therapists and capacity
     active_ther = [t for t in therapists if t.is_active(month)]
     
-    # Calculate capacity for each therapist
+    # Calculate capacity for each therapist (in scheduled sessions)
     therapist_capacity = {}
     for t in therapists:
         if t.is_active(month):
             sess = t.get_sessions_per_month(month, WEEKS_PER_MONTH, ramp_speed)
+            # Capacity is SCHEDULED sessions, divide by scheduled sessions per client
             therapist_capacity[t.id] = sess / avg_sess_mo if avg_sess_mo > 0 else 0
         else:
             therapist_capacity[t.id] = 0
@@ -700,19 +706,18 @@ for month in range(1, sim_months + 1):
     month_data["marketing_spent"] = actual_mkt_spent
     
     # Sessions and revenue - based on each therapist's actual clients
-    # FIX #4: Cap sessions at therapist capacity
+    # Framework A: Scheduled-based (cancellations reduce both capacity and demand)
     therapist_sessions = {}
     for t in therapists:
         if t.is_active(month):
             t_clients = therapist_clients[t.id]
-            # Therapist capacity (scheduled)
+            
+            # Therapist capacity (scheduled, then apply cancellation)
             t_capacity_scheduled = t.get_sessions_per_month(month, WEEKS_PER_MONTH, ramp_speed) * attendance_factor
-            # Therapist capacity (completed, after cancellations)
             t_capacity_completed = t_capacity_scheduled * (1 - cancel_rate)
             
-            # Client demand (scheduled)
+            # Client demand (scheduled, then apply cancellation)
             t_scheduled_sessions = t_clients * avg_sess_mo * attendance_factor
-            # Client demand (completed, after cancellations)
             t_completed_sessions = t_scheduled_sessions * (1 - cancel_rate)
             
             # Cap completed demand at completed capacity
@@ -844,6 +849,7 @@ for month in range(1, sim_months + 1):
     
     # Store therapist client counts for display
     month_data["therapist_clients"] = dict(therapist_clients)
+    month_data["therapist_sessions"] = dict(therapist_sessions)
     
     # Store cohort details for debugging
     month_data["total_cohorts"] = sum(len(cohorts) for cohorts in therapist_cohorts.values())
@@ -1357,10 +1363,89 @@ with st.expander("🔍 Client Cohort Details (Debug)"):
             for cohort in cohorts:
                 st.markdown(f"- Started Month {cohort[0]}: {cohort[1]:.1f} clients (age: {cohort[2]} months)")
 
+# WEEKLY SESSIONS TABLE
+st.markdown("---")
+st.header("📋 Weekly Sessions by Therapist")
+
+st.markdown("**Average sessions per week (completed after cancellations)**")
+
+# Build table data
+sessions_table_data = []
+
+for therapist in therapists:
+    # Skip non-hired therapists
+    if therapist.hire_month == 0 and therapist.id != 0 and not therapist.start_full:
+        continue
+    
+    # Calculate by year
+    for year_num in range(1, (sim_months // 12) + 2):
+        start_month = (year_num - 1) * 12 + 1
+        end_month = min(year_num * 12, sim_months)
+        
+        if start_month <= sim_months:
+            # Find active months for this therapist in this year
+            year_sessions = []
+            for m in range(start_month, end_month + 1):
+                if therapist.is_active(m):
+                    month_idx = m - 1
+                    if month_idx < len(df):
+                        # Get this therapist's sessions this month
+                        month_data = df.iloc[month_idx]
+                        therapist_sessions_dict = month_data.get('therapist_sessions', {})
+                        if therapist.id in therapist_sessions_dict:
+                            year_sessions.append(therapist_sessions_dict[therapist.id])
+            
+            if len(year_sessions) > 0:
+                total_sessions = sum(year_sessions)
+                avg_per_month = total_sessions / len(year_sessions)
+                avg_per_week = avg_per_month / WEEKS_PER_MONTH
+                
+                # Calculate scheduled (before cancellations)
+                scheduled_per_week = avg_per_week / (1 - cancel_rate) if cancel_rate < 1 else avg_per_week
+                
+                # Calculate capacity utilization
+                therapist_capacity_week = therapist.sessions_per_week_target * therapist.get_capacity_percentage(end_month, ramp_speed)
+                capacity_pct = (scheduled_per_week / therapist_capacity_week * 100) if therapist_capacity_week > 0 else 0
+                
+                sessions_table_data.append({
+                    'Therapist': therapist.name,
+                    'Year': f"Year {year_num}",
+                    'Scheduled/Week': f"{scheduled_per_week:.1f}",
+                    'Completed/Week': f"{avg_per_week:.1f}",
+                    'Target Capacity': f"{therapist_capacity_week:.1f}",
+                    'Utilization': f"{capacity_pct:.0f}%"
+                })
+
+if len(sessions_table_data) > 0:
+    import pandas as pd
+    sessions_df = pd.DataFrame(sessions_table_data)
+    
+    # Pivot to show years as columns
+    for therapist_name in sessions_df['Therapist'].unique():
+        therapist_data = sessions_df[sessions_df['Therapist'] == therapist_name]
+        
+        st.subheader(therapist_name)
+        
+        # Create display table
+        display_data = []
+        for _, row in therapist_data.iterrows():
+            display_data.append({
+                'Year': row['Year'],
+                'Scheduled': row['Scheduled/Week'],
+                'Completed': row['Completed/Week'],
+                'Target': row['Target Capacity'],
+                'Utilization': row['Utilization']
+            })
+        
+        display_df = pd.DataFrame(display_data)
+        st.table(display_df)
+else:
+    st.info("No active therapists to display")
+
 # EXPORT
 st.markdown("---")
 st.header("📥 Export")
 csv = df.to_csv(index=False)
 st.download_button("Download CSV", csv, f"practice_model_v44_{sim_months}mo.csv", "text/csv")
 
-st.success("✅ Model V4.4 Complete - Churn model fixed!")
+st.success("✅ Model V4.5 Complete - Framework A (scheduled-based) + Weekly sessions table")
