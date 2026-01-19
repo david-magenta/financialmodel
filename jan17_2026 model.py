@@ -7,7 +7,7 @@ from typing import Dict, List, Tuple
 from collections import defaultdict
 
 st.set_page_config(page_title="Therapy Practice Financial Model Jan 17 2026", layout="wide")
-st.title("🧠 Therapy Practice Financial Model V4.4")
+st.title("🧠 Therapy Practice Financial Model Jan 17 2026")
 st.markdown("Fixed churn modeling - each client cohort experiences proper churn progression")
 
 # ==========================================
